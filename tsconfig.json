@@ -1,0 +1,12 @@
+{
+	"extends": "@tsconfig/node22/tsconfig.json",
+	"compilerOptions": {
+		"types": ["vitest/globals", "node"],
+		"emitDecoratorMetadata": true,
+		"experimentalDecorators": true,
+		"allowImportingTsExtensions": true,
+		"noEmit": true,
+		"declaration": true
+	},
+	"include": ["src", "tests", "*.ts"]
+}

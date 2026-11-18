@@ -1,0 +1,124 @@
+{
+	"name": "nestjs-better-auth-adapter",
+	"version": "0.1.0",
+	"description": "Better Auth for NestJS, through @nestjs/authentication and @nestjs/authorization",
+	"author": "Manuel Antunes",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/Manuel-Antunes/nestjs-better-auth-adapter.git"
+	},
+	"engines": {
+		"node": ">=22.12.0"
+	},
+	"packageManager": "bun@1.3.11",
+	"keywords": [
+		"nestjs",
+		"better-auth",
+		"auth",
+		"authentication",
+		"authorization",
+		"@nestjs/authentication",
+		"@nestjs/authorization"
+	],
+	"type": "module",
+	"scripts": {
+		"build": "unbuild",
+		"prepack": "bun run build",
+		"lint": "biome lint",
+		"format": "biome format",
+		"check": "biome check",
+		"typecheck": "tsc -p tsconfig.json",
+		"test": "bun run test:express && bun run test:fastify",
+		"test:watch": "vitest",
+		"test:express": "TEST_HTTP_ADAPTER=express vitest run",
+		"test:fastify": "TEST_HTTP_ADAPTER=fastify vitest run",
+		"test:dist": "node tests/dist/smoke.mjs"
+	},
+	"types": "dist/index.d.mts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.mts",
+			"import": "./dist/index.mjs",
+			"default": "./dist/index.mjs"
+		},
+		"./plugin": {
+			"types": "./dist/plugin/index.d.mts",
+			"import": "./dist/plugin/index.mjs",
+			"default": "./dist/plugin/index.mjs"
+		},
+		"./authorization": {
+			"types": "./dist/authorization/index.d.mts",
+			"import": "./dist/authorization/index.mjs",
+			"default": "./dist/authorization/index.mjs"
+		}
+	},
+	"files": [
+		"dist"
+	],
+	"peerDependencies": {
+		"@nestjs/authentication": ">=0.1.6 <0.2.0",
+		"@nestjs/authorization": ">=0.1.4 <0.2.0",
+		"@nestjs/common": "^12.0.0",
+		"@nestjs/core": "^12.0.0",
+		"@nestjs/graphql": "^14.0.0",
+		"@nestjs/websockets": "^12.0.0",
+		"better-auth": "^1.7.0",
+		"express": "^5.1.0",
+		"qs": "^6.14.0"
+	},
+	"peerDependenciesMeta": {
+		"@nestjs/authorization": {
+			"optional": true
+		},
+		"@nestjs/graphql": {
+			"optional": true
+		},
+		"@nestjs/websockets": {
+			"optional": true
+		},
+		"express": {
+			"optional": true
+		},
+		"qs": {
+			"optional": true
+		}
+	},
+	"devDependencies": {
+		"@apollo/server": "^5",
+		"@as-integrations/express5": "^1.1.2",
+		"@as-integrations/fastify": "^3.1.0",
+		"@better-auth/api-key": "1.7.25",
+		"@biomejs/biome": "2.2.4",
+		"@nestjs/apollo": "^14",
+		"@nestjs/authentication": "0.1.6",
+		"@nestjs/authorization": "0.1.4",
+		"@nestjs/common": "^12.5.1",
+		"@nestjs/core": "^12.5.1",
+		"@nestjs/graphql": "^14",
+		"@nestjs/platform-express": "^12.5.1",
+		"@nestjs/platform-fastify": "^12.5.1",
+		"@nestjs/platform-socket.io": "^12.5.1",
+		"@nestjs/testing": "^12.5.1",
+		"@nestjs/websockets": "^12.5.1",
+		"@swc/core": "^1.16.22",
+		"@tsconfig/node22": "^22.0.7",
+		"@types/express": "^5",
+		"@types/node": "^26.6.6",
+		"@types/supertest": "^7.2.1",
+		"better-auth": "1.7.25",
+		"express": "^5",
+		"fastify": "^5",
+		"graphql": "^16",
+		"qs": "^6.17.1",
+		"reflect-metadata": "^0.2.2",
+		"rxjs": "^7.8.2",
+		"socket.io": "^4.8.4",
+		"socket.io-client": "^4.8.4",
+		"supertest": "^7.3.2",
+		"typescript": "^6",
+		"unbuild": "^3.6.1",
+		"unplugin-swc": "^2.0.0",
+		"vitest": "^3.2.4"
+	}
+}
