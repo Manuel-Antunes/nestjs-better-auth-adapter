@@ -1,6 +1,6 @@
 node_modules
-dist
-.vitest-cjs
+/dist
+/.vitest-cjs
 coverage
 *.log
 .DS_Store
