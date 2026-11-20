@@ -189,7 +189,10 @@ export interface TestAppOptions {
 	authentication?: AuthenticationModuleOptions;
 	/** Import `AuthorizationModule` (deny-by-default). */
 	authorization?: boolean;
+	/** Apollo's `GraphQLModule`, on `/graphql`. */
 	graphql?: boolean;
+	/** Another `GraphQLModule` than `graphql`'s (another driver, a subgraph). */
+	graphqlModule?: DynamicModule;
 	globalPrefix?: string;
 	/**
 	 * Keep Nest's own body parser, as an app with `routes: false` does.
@@ -201,6 +204,19 @@ export interface TestAppOptions {
 	/** The WebSocket adapter, e.g. `(app) => new WsAdapter(app)`; socket.io's by default. */
 	webSocketAdapter?: (app: INestApplication) => WebSocketAdapter;
 }
+
+/**
+ * Apollo's `context`, with the response the session provider sends its
+ * cookies through: Apollo calls it with `{ req, res }` on Express, but with
+ * `(request, reply)` on Fastify.
+ */
+export const apolloContext = (
+	first: { req: Request; res: Response } | object,
+	reply?: object,
+) =>
+	process.env.TEST_HTTP_ADAPTER === "fastify"
+		? { req: first, reply }
+		: { ...(first as { req: Request; res: Response }) };
 
 /** An app with `AuthenticationModule` and `BetterAuthModule`, initialized on the adapter under test. */
 export async function createTestApp(options: TestAppOptions) {
@@ -218,13 +234,11 @@ export async function createTestApp(options: TestAppOptions) {
 							driver: ApolloDriver,
 							autoSchemaFile: true,
 							path: "/graphql",
-							context: ({ req, res }: { req: Request; res: Response }) => ({
-								req,
-								res,
-							}),
+							context: apolloContext,
 						}),
 					]
 				: []),
+			...(options.graphqlModule ? [options.graphqlModule] : []),
 			...(options.imports ?? []),
 		],
 		controllers: options.controllers ?? [TestController],
