@@ -1,13 +1,21 @@
 import type { oauthProviderResourceClient } from "@better-auth/oauth-provider/resource-client";
 import type { DpopReplayStore } from "better-auth/oauth2";
 
-/** `BetterAuthOAuthProvider`'s options, checked, with their defaults. */
-export interface OAuthResourceSettings {
+/** One of the resource identifiers a `BetterAuthOAuthProvider` accepts tokens for. */
+export interface OAuthResourceIdentifier {
 	audience: string;
-	/** Where the RFC 9728 metadata is served, if it is. */
+	/** Its URL's path, without a trailing slash: matched against the request's. */
+	path: string;
+	/** Where its RFC 9728 metadata is served, if it is. */
 	metadataPath?: string;
 	/** Its absolute URL, for `WWW-Authenticate`'s `resource_metadata`. */
 	metadataUrl: string;
+}
+
+/** `BetterAuthOAuthProvider`'s options, checked, with their defaults. */
+export interface OAuthResourceSettings {
+	/** Its audiences, in the order given: the first is the default. */
+	resources: readonly [OAuthResourceIdentifier, ...OAuthResourceIdentifier[]];
 	metadata: Record<string, unknown>;
 	checkSession: boolean;
 	dpopReplayStore?: DpopReplayStore;

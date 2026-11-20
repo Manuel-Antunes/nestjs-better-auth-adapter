@@ -5,6 +5,7 @@ import { findPlugin } from "../plugins.ts";
 import type { BetterAuthOAuthProviderOptions } from "./interfaces/better-auth-oauth-provider-options.interface.ts";
 import type {
 	OAuthResourceClient,
+	OAuthResourceIdentifier,
 	OAuthResourceSettings,
 	ResourceClientAuth,
 } from "./interfaces/oauth-resource.interface.ts";
@@ -18,26 +19,89 @@ export function resolveOAuthResource(
 	provider: string,
 	settings: BetterAuthOAuthProviderOptions,
 ): OAuthResourceSettings {
+	const given: unknown = settings?.audience;
+	const audiences: unknown[] =
+		typeof given === "string" ? [given] : Array.isArray(given) ? given : [];
+	if (!audiences.length)
+		throw new BetterAuthConfigurationError(
+			`${provider}'s audience must be this API's resource identifier, an http(s) URL without a fragment (like 'https://api.example.com'), or a non-empty array of them, not ${JSON.stringify(given)}.`,
+		);
+	const serve = settings.resourceMetadata !== false;
+	const [first, ...others] = audiences.map((audience) =>
+		resolveIdentifier(provider, audience, serve),
+	);
+	const resources = [first, ...others] as OAuthResourceSettings["resources"];
+
+	const listed = new Set<string>();
+	/** The audience whose metadata each path serves. */
+	const served = new Map<string, string>();
+	for (const { audience, metadataPath } of resources) {
+		if (listed.has(audience))
+			throw new BetterAuthConfigurationError(
+				`${provider} lists the audience ${audience} twice.`,
+			);
+		listed.add(audience);
+		if (!metadataPath) continue;
+		const other = served.get(metadataPath);
+		if (other)
+			throw new BetterAuthConfigurationError(
+				`${provider}'s audiences ${other} and ${audience} have their resource metadata at the same path, ${metadataPath}, which serves only one: give them different paths, or resourceMetadata: false.`,
+			);
+		served.set(metadataPath, audience);
+	}
+
+	return {
+		resources,
+		metadata: settings.resourceMetadata || {},
+		checkSession: settings.checkSession ?? true,
+		dpopReplayStore: settings.dpopReplayStore,
+	};
+}
+
+function resolveIdentifier(
+	provider: string,
+	audience: unknown,
+	serve: boolean,
+): OAuthResourceIdentifier {
 	let url: URL | undefined;
 	try {
-		url = new URL(settings?.audience);
+		url = typeof audience === "string" ? new URL(audience) : undefined;
 	} catch {}
 	if (!url || !/^https?:$/.test(url.protocol) || url.hash)
 		throw new BetterAuthConfigurationError(
-			`${provider}'s audience must be this API's resource identifier, an http(s) URL without a fragment (like 'https://api.example.com'), not ${JSON.stringify(settings?.audience)}.`,
+			`${provider}'s audience must be this API's resource identifier, an http(s) URL without a fragment (like 'https://api.example.com'), not ${JSON.stringify(audience)}.`,
 		);
 
 	// RFC 9728 §3.1: the well-known segment goes between the host and the path.
 	const path = url.pathname.replace(/\/$/, "");
 	const wellKnown = `/.well-known/oauth-protected-resource${path}`;
 	return {
-		audience: settings.audience,
-		metadataPath: settings.resourceMetadata === false ? undefined : wellKnown,
+		audience: audience as string,
+		path,
+		metadataPath: serve ? wellKnown : undefined,
 		metadataUrl: `${url.origin}${wellKnown}${url.search}`,
-		metadata: settings.resourceMetadata || {},
-		checkSession: settings.checkSession ?? true,
-		dpopReplayStore: settings.dpopReplayStore,
 	};
+}
+
+/**
+ * The resource a request at `path` is for: the one whose path `path` is
+ * under, the longest when several are, else the first.
+ */
+export function resourceForPath(
+	resources: OAuthResourceSettings["resources"],
+	path: string | undefined,
+): OAuthResourceIdentifier {
+	if (resources.length === 1 || !path) return resources[0];
+	let match: OAuthResourceIdentifier | undefined;
+	for (const resource of resources) {
+		const under =
+			resource.path === "" ||
+			path === resource.path ||
+			path.startsWith(`${resource.path}/`);
+		if (under && (!match || resource.path.length > match.path.length))
+			match = resource;
+	}
+	return match ?? resources[0];
 }
 
 /** Fails at startup when `auth` can't issue the JWT access tokens `provider` verifies. */
