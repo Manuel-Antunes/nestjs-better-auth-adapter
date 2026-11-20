@@ -8,6 +8,14 @@ export interface NestjsPluginOptions {
 	 * @default true
 	 */
 	mfa?: boolean;
+	/**
+	 * Publish Better Auth's sign-ins, sign-outs, second-factor changes,
+	 * password resets and email verifications as `@nestjs/authentication`'s
+	 * `AuthenticationEvents`, once `BetterAuthModule` runs next to
+	 * `AuthenticationModule`.
+	 * @default true
+	 */
+	events?: boolean;
 }
 
 /** What the `nestjs()` plugin reads of `twoFactor()`. */

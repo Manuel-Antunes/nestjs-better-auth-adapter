@@ -84,6 +84,7 @@ curl -b jar -H 'content-type: application/json' -d '{"title":"Hello","body":"Wor
 | `@Authenticate({ mfa: true })` (step-up) | deleting projects, plan changes; on Better Auth's routes (bans, deleting organizations, creating API keys, revoking other sessions), [`SensitiveRoutesHooks`](src/auth/hooks/sensitive-routes.hooks.ts) asks the same |
 | `@CurrentUser('locale')` (an additional field) | [`account.controller.ts`](src/account/account.controller.ts) |
 | `AuthenticationContext` in a service | [`src/projects/projects.service.ts`](src/projects/projects.service.ts), [`billing.controller.ts`](src/billing/billing.controller.ts) |
+| `AuthenticationEvents` (Better Auth's sign-ins, sign-outs, second factors, password resets, verified addresses, published by the `nestjs()` plugin) in the audit trail, as `auth.<type>` | [`src/audit/audit.service.ts`](src/audit/audit.service.ts), tested in [`authentication.e2e-spec.ts`](test/authentication.e2e-spec.ts) |
 | GraphQL and socket.io | [`projects.resolver.ts`](src/projects/projects.resolver.ts), [`projects.gateway.ts`](src/projects/projects.gateway.ts) |
 
 ### Nest handlers and `PasswordHasher`

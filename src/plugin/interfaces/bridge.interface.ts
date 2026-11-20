@@ -1,3 +1,4 @@
+import type { AuthenticationEvent } from "@nestjs/authentication";
 import type { BetterAuthPlugin } from "better-auth";
 import type { createAuthMiddleware } from "better-auth/api";
 
@@ -21,4 +22,8 @@ export interface NestBridge {
 	hooks: { before: BridgeHook[]; after: BridgeHook[] };
 	// biome-ignore lint/suspicious/noExplicitAny: shaped like Better Auth's `databaseHooks` option
 	databaseHooks: Record<string, any>;
+	/** Whether the plugin publishes authentication events (its `events` option). */
+	events: boolean;
+	/** Publishes to Nest's `AuthenticationEvents`, once `BetterAuthModule` bound it. */
+	emit?: (event: AuthenticationEvent) => void;
 }

@@ -14,6 +14,7 @@ import {
 import { mapToExcludeRoute } from "@nestjs/core/middleware/utils.js";
 import { toNodeHandler } from "better-auth/node";
 import { BetterAuthAccessControl } from "./access-control.ts";
+import { BetterAuthEventsBinding } from "./authentication-events.binding.ts";
 import {
 	BETTER_AUTH_MODULE_OPTIONS,
 	ConfigurableModuleClass,
@@ -58,8 +59,9 @@ import { bridgeOf } from "./plugins.ts";
  *   `@CurrentUser()`, `@CurrentSession()`, `@Authenticate()` and
  *   `AuthenticationContext` work as the Nest docs describe;
  * - plugs the Nest handlers, `OidcAccountResolver` and `PasswordHasher` it
- *   finds into Better Auth, and runs `@Hook()` / `@DatabaseHook()` providers
- *   inside it, through the `nestjs()` plugin;
+ *   finds into Better Auth, runs `@Hook()` / `@DatabaseHook()` providers
+ *   inside it, and publishes its flows as `AuthenticationEvents`, through
+ *   the `nestjs()` plugin;
  * - with `oauthProvider()`, serves its discovery documents outside the base
  *   path too. Accepting its access tokens is `BetterAuthOAuthProviderModule`'s,
  *   from `nestjs-better-auth-adapter/oauth-provider`.
@@ -89,6 +91,7 @@ import { bridgeOf } from "./plugins.ts";
 		BetterAuthHooksExplorer,
 		BetterAuthHandlersCheck,
 		BetterAuthPasswordHasherBinding,
+		BetterAuthEventsBinding,
 		BetterAuthOwnedStore,
 	],
 	exports: [

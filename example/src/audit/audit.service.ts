@@ -1,4 +1,8 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable, Logger, type OnModuleInit } from "@nestjs/common";
+import {
+	type AuthenticationEvent,
+	AuthenticationEvents,
+} from "@nestjs/authentication";
 import { OnEvent } from "@nestjs/event-emitter";
 import { and, desc, eq, type SQL } from "drizzle-orm";
 import { AppEvent } from "../common/enums/app-event.enum.ts";
@@ -6,7 +10,6 @@ import {
 	type AccountLinkedEvent,
 	type BillingChangedEvent,
 	type ProjectCreatedEvent,
-	type SessionCreatedEvent,
 	type SignInFailedEvent,
 	type UserEvent,
 	type UserUpdatedEvent,
@@ -28,15 +31,30 @@ export interface AuditEntry {
  * caused them, read from {@link RequestMetadata}: that works inside Better
  * Auth's hooks too, since `BetterAuthModule`'s `middleware` opens the
  * context for its routes.
+ *
+ * Sign-ins, sign-outs, second-factor changes, password resets and email
+ * verifications come from `@nestjs/authentication`'s `AuthenticationEvents`,
+ * which the `nestjs()` plugin publishes for Better Auth's routes: recorded as
+ * `auth.<type>` (`auth.sign-in`, `auth.mfa-failed`...). The app's own
+ * events (`@nestjs/event-emitter`) cover the rest.
  */
 @Injectable()
-export class AuditService {
+export class AuditService implements OnModuleInit {
 	private readonly logger = new Logger(AuditService.name);
 
 	constructor(
 		@InjectDrizzle() private readonly db: Database,
 		private readonly request: RequestMetadata,
+		private readonly authentication: AuthenticationEvents,
 	) {}
+
+	/** Subscribed for the app's lifetime: `events$` completes when it shuts down. */
+	onModuleInit() {
+		this.authentication.events$.subscribe((event) => {
+			// Published inside the request, so the entry carries its id and IP.
+			void this.safely(authenticationEntry(event));
+		});
+	}
 
 	async record(entry: AuditEntry) {
 		await this.db.insert(auditEvents).values({
@@ -96,15 +114,6 @@ export class AuditService {
 		return this.safely({ action: "user.deleted", actorId: event.userId });
 	}
 
-	@OnEvent(AppEvent.SessionCreated, { async: true })
-	onSessionCreated(event: SessionCreatedEvent) {
-		return this.safely({
-			action: "session.created",
-			actorId: event.userId,
-			metadata: { sessionId: event.sessionId, userAgent: event.userAgent },
-		});
-	}
-
 	@OnEvent(AppEvent.AccountLinked, { async: true })
 	onAccountLinked(event: AccountLinkedEvent) {
 		return this.safely({
@@ -150,4 +159,13 @@ export class AuditService {
 			this.logger.error(`Could not record ${entry.action}`, error);
 		}
 	}
+}
+
+/** An authentication event as an audit entry: its user is the actor, the rest is metadata. */
+function authenticationEntry(event: AuthenticationEvent): AuditEntry {
+	const { type, ...details } = event;
+	const { userId, ...metadata } = details as typeof details & {
+		userId?: string;
+	};
+	return { action: `auth.${type}`, actorId: userId ?? null, metadata };
 }

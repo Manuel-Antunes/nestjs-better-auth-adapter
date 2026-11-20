@@ -17,13 +17,6 @@ export interface UserUpdatedEvent {
 	emailVerified: boolean;
 }
 
-export interface SessionCreatedEvent {
-	userId: string;
-	sessionId: string;
-	ipAddress: string | null;
-	userAgent: string | null;
-}
-
 export interface AccountLinkedEvent {
 	userId: string;
 	providerId: string;

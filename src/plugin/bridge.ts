@@ -19,4 +19,5 @@ export function resetBridge(bridge: NestBridge): void {
 	for (const model of Object.keys(bridge.databaseHooks)) {
 		delete bridge.databaseHooks[model];
 	}
+	bridge.emit = undefined;
 }

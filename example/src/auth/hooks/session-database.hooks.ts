@@ -7,15 +7,16 @@ import {
 	DatabaseHook,
 } from "nestjs-better-auth-adapter";
 import { AppEvent } from "../../common/enums/app-event.enum.ts";
-import {
-	type AccountLinkedEvent,
-	type SessionCreatedEvent,
-} from "../../common/events.ts";
+import type { AccountLinkedEvent } from "../../common/events.ts";
 import type { Auth } from "../create-auth.ts";
 import type { AccountRow } from "../interfaces/account-row.interface.ts";
 import type { SessionRow } from "../interfaces/session-row.interface.ts";
 
-/** Better Auth database hooks for sessions and accounts. */
+/**
+ * Better Auth database hooks for sessions and accounts. Sign-ins and
+ * sign-outs reach the audit trail as Nest's `AuthenticationEvents`, which
+ * the `nestjs()` plugin publishes: see `AuditService`.
+ */
 @DatabaseHook()
 @Injectable()
 export class SessionDatabaseHooks {
@@ -38,16 +39,6 @@ export class SessionDatabaseHooks {
 		});
 		if (!membership) return;
 		return { data: { activeOrganizationId: membership.organizationId } };
-	}
-
-	@AfterCreate("session")
-	announceSession(session: SessionRow) {
-		this.events.emit(AppEvent.SessionCreated, {
-			userId: session.userId,
-			sessionId: session.id,
-			ipAddress: session.ipAddress ?? null,
-			userAgent: session.userAgent ?? null,
-		} satisfies SessionCreatedEvent);
 	}
 
 	@AfterCreate("account")

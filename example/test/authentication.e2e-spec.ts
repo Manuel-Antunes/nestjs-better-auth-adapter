@@ -270,7 +270,7 @@ describe("authentication", () => {
 	});
 
 	describe("audit trail (hooks + request context)", () => {
-		it("records sign-ins with the request id of the Better Auth request (BetterAuthModule middleware)", async () => {
+		it("records sign-ins, from Nest's AuthenticationEvents, with the request id of the Better Auth request (BetterAuthModule middleware)", async () => {
 			const user = await signUp(t);
 			await t
 				.http()
@@ -287,9 +287,28 @@ describe("authentication", () => {
 				return row;
 			});
 			expect(event).toMatchObject({
-				action: "session.created",
+				action: "auth.sign-in",
 				actorId: user.id,
+				metadata: { method: "password" },
 			});
+		});
+
+		it("records sign-outs, from Nest's AuthenticationEvents", async () => {
+			const user = await signUp(t);
+			await t
+				.http()
+				.post("/api/auth/sign-out")
+				.set("Authorization", user.bearer)
+				.expect(200);
+
+			const event = await waitFor(async () => {
+				const rows = await t.db
+					.select()
+					.from(auditEvents)
+					.where(eq(auditEvents.action, "auth.sign-out"));
+				return rows.find((row) => row.actorId === user.id);
+			});
+			expect(event.metadata).toEqual({ sessionId: expect.any(String) });
 		});
 
 		it("records refused sign-ins (@AfterHook without a path)", async () => {

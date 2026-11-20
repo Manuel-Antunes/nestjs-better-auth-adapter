@@ -11,6 +11,7 @@ Better Auth stays the engine: it serves its routes (`/api/auth/*`), stores users
 | `PasswordResetHandler`, `EmailVerificationHandler`, `MagicLinkHandler` (through `BetterAuthPasswordResetHandler` and the others, registered in `AuthenticationRegistry`) | Deliver Better Auth's links |
 | `OidcAccountResolver` (through `BetterAuthOidcAccountResolver`, registered as `oidc`) | Confirms or refuses the user Better Auth attaches a social/OAuth identity to, through `user.validateUserInfo` |
 | `PasswordHasher` | Hashes Better Auth's passwords |
+| `AuthenticationEvents` | Better Auth's sign-ins, sign-outs, second-factor changes, password resets and email verifications |
 | `@Policy()` / `@Can()` | Better Auth's access control (`admin()` and `organization()` plugins) |
 
 Every integration past authentication is optional: without the matching Nest provider, Better Auth keeps what its own config says.
@@ -21,6 +22,7 @@ Every integration past authentication is optional: without the matching Nest pro
 - [Quick start](#quick-start)
 - [Authentication](#authentication)
 - [Second factor (MFA)](#second-factor-mfa)
+- [Authentication events](#authentication-events)
 - [OAuth 2.1 and OpenID Connect provider](#oauth-21-and-openid-connect-provider)
 - [Module configuration](#module-configuration)
 - [Scaling: secondary storage and the cookie cache](#scaling-secondary-storage-and-the-cookie-cache)
@@ -292,6 +294,40 @@ transfer() {}
 A client gets `401` with `error: "mfa_required"`, and can call a verification endpoint with its current session to step up.
 
 `nestjs({ mfa: false })` leaves the column out; no session is reported as verified then.
+
+## Authentication events
+
+`@nestjs/authentication`'s `AuthenticationEvents` is the audit trail of sign-ins, sign-outs, second-factor changes, password resets and email verifications. Nest's own services publish to it; with Better Auth doing those flows, the `nestjs()` plugin publishes them instead, from Better Auth's routes, whichever client called them. Subscribe as the Nest docs describe:
+
+```ts
+@Injectable()
+export class AuthenticationAudit implements OnModuleInit {
+  private readonly logger = new Logger(AuthenticationAudit.name);
+
+  constructor(private readonly events: AuthenticationEvents) {}
+
+  onModuleInit() {
+    this.events.events$.subscribe((event) => {
+      if (event.type === "sign-in") this.logger.log(`${event.userId} signed in with ${event.method}`);
+    });
+  }
+}
+```
+
+Each event also goes out on its `node:diagnostics_channel` channel (`nestjs:authentication:<type>`). They are published inside the request, before its response, so a request-scoped context (a request id, the IP) is still there. `events$` calls its subscribers synchronously: start slow work (a database write) without awaiting it, as the example's audit trail does. An event the plugin can't read (a database outage while it looks a session up) is logged, never a failed request.
+
+| Event | Published when |
+| --- | --- |
+| `sign-in` | A route creates a session for someone who didn't hold it: `method` is `password` (`/sign-in/email`, `/sign-up/email`, username, phone number), `magic-link`, `oidc:<provider>` (social and generic OAuth callbacks, `/sign-in/social` with an ID token), `email-otp`, `passkey`, `impersonation`..., or the end of the `/sign-in/<method>` path. A password sign-in `twoFactor()` challenges has `mfa: 'pending'` and no `sessionId` (Better Auth replaces the session with the challenge); one from a trusted device has `mfa: 'verified'`. Sessions that replace one (two-factor verification, enabling or disabling it, `/change-password`, `/admin/stop-impersonating`) are no sign-in. |
+| `sign-out` | `/sign-out`, `/revoke-session` and `/admin/revoke-user-session`, with the `sessionId` they really ended; each session `/revoke-other-sessions` ends; `everywhere: true` for `/revoke-sessions`, `/admin/revoke-user-sessions` and `/admin/ban-user`. |
+| `mfa-enabled` | A TOTP authenticator confirmed by its first code, or two-factor enabled without one (`method: 'otp'`, `skipVerificationOnEnable`). `replaced` is always `false`: Better Auth refuses to enroll over a confirmed authenticator. |
+| `mfa-verified` / `mfa-failed` | A TOTP or backup code (`recovery-code`) that counts as a second factor ([above](#second-factor-mfa)), or one refused. `failures` is the account lockout's count for a sign-in challenge (`1` on step-up, which Better Auth doesn't count); `locked` once it locks the account or the challenge. |
+| `mfa-disabled`, `recovery-codes-generated` | `/two-factor/disable`; `/two-factor/generate-backup-codes`, with how many. |
+| `password-reset-requested` / `password-reset` | `/request-password-reset` (the lowercased address, and `userId` when it has an account) and `/reset-password`; the email OTP plugin's equivalents. |
+| `email-verified` | Better Auth marks an address verified: the verification link, an email OTP, a magic link to an unverified account, a provider that vouches for the address. Not an admin setting the flag. |
+| `magic-link-refused` | `/magic-link/verify` turns a link down: `unknown` (Better Auth doesn't tell an expired link from a used or unknown one), or `refused` (sign-up disabled, a database hook refused the user). |
+
+Better Auth has nothing to publish `refresh-token-reused` (its JWTs are not refresh-token families) or `session-touch-failed` for, nor `not-this-browser` refusals of magic links. Email and SMS one-time codes (`/two-factor/verify-otp`) mark the session verified but publish no `mfa-verified`: Nest's event only has `totp` and `recovery-code`. `nestjs({ events: false })` publishes nothing. Without `AuthenticationModule`, there is nothing to publish to.
 
 ## OAuth 2.1 and OpenID Connect provider
 
@@ -1106,6 +1142,7 @@ With socket.io, `WsAuthenticator` reads the handshake itself: `authenticateConne
 | Option | Default | |
 | --- | --- | --- |
 | `mfa` | `true` | Record verified second factors on the session (`session.mfaVerifiedAt`). |
+| `events` | `true` | Publish Better Auth's flows as `AuthenticationEvents` ([above](#authentication-events)). |
 
 ## Example app
 
