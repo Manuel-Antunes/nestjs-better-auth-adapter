@@ -3,6 +3,7 @@ import {
 	createTestApp,
 	createTestAuth,
 	signUp,
+	uniqueEmail,
 	verifyEmail,
 } from "../shared/app.ts";
 
@@ -170,13 +171,10 @@ describe("authentication e2e", () => {
 	});
 });
 
-describe("authentication e2e: providers option", () => {
-	it("leaves the session provider out with providers.session: false", async () => {
+describe("authentication e2e: registered providers", () => {
+	it("registers none itself: without the app's, a session doesn't sign in", async () => {
 		const auth = createTestAuth();
-		const { app } = await createTestApp({
-			auth,
-			module: { providers: { session: false } },
-		});
+		const { app } = await createTestApp({ auth, authProviders: [] });
 
 		try {
 			const { token } = await signUp(auth);
@@ -184,6 +182,40 @@ describe("authentication e2e: providers option", () => {
 				.get("/test/protected")
 				.set("Authorization", `Bearer ${token}`)
 				.expect(401);
+		} finally {
+			await app.close();
+		}
+	});
+});
+
+describe("authentication e2e: the session cookie across origins", () => {
+	it("ignores it on a write from an origin Better Auth doesn't trust, as SessionCookieProvider does", async () => {
+		const auth = createTestAuth({ trustedOrigins: ["http://app.example"] });
+		const { app } = await createTestApp({ auth });
+
+		try {
+			const signedUp = await request(app.getHttpServer())
+				.post("/api/auth/sign-up/email")
+				.send({ email: uniqueEmail(), password: "password-123456", name: "U" })
+				.expect(200);
+			const cookie = (signedUp.headers["set-cookie"] as unknown as string[])
+				.map((value) => value.split(";")[0])
+				.join("; ");
+			const write = (headers: Record<string, string>) =>
+				request(app.getHttpServer())
+					.post("/test/write")
+					.set({ cookie, ...headers });
+
+			await write({}).expect(201);
+			await write({ origin: "http://app.example" }).expect(201);
+			await write({ "sec-fetch-site": "same-origin" }).expect(201);
+			await write({ origin: "https://attacker.example" }).expect(401);
+			await write({ "sec-fetch-site": "cross-site" }).expect(401);
+			// Reads never change state: the cookie counts.
+			await request(app.getHttpServer())
+				.get("/test/protected")
+				.set({ cookie, origin: "https://attacker.example" })
+				.expect(200);
 		} finally {
 			await app.close();
 		}

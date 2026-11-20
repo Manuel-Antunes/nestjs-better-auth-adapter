@@ -1,0 +1,4 @@
+[install]
+# One node_modules tree for the package and the example workspace: a single
+# copy of every @nestjs/* package (Nest compares classes by identity).
+linker = "hoisted"

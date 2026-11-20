@@ -1,18 +1,23 @@
 import { Injectable } from "@nestjs/common";
 import request from "supertest";
 import {
-	EmailVerificationHandler,
+	AuthenticationRegistry,
 	type EmailVerificationLink,
-	MagicLinkHandler,
 	type MagicLink,
-	OidcAccountResolver,
 	PasswordHasher,
 	PasswordResetHandler,
 	type PasswordResetLink,
+	PasswordResetService,
 } from "@nestjs/authentication";
 import { magicLink } from "better-auth/plugins/magic-link";
 import { twoFactor } from "better-auth/plugins/two-factor";
 import { hashPassword } from "better-auth/crypto";
+import {
+	BetterAuthEmailVerificationHandler,
+	BetterAuthMagicLinkHandler,
+	BetterAuthPasswordResetHandler,
+	BetterAuthService,
+} from "../../src/index.ts";
 import {
 	betterAuthPassword,
 	fromNestHandler,
@@ -24,52 +29,106 @@ import {
 	signUp,
 	uniqueEmail,
 } from "../shared/app.ts";
+import { withEnv } from "../shared/env.ts";
+
+/** Records the passw/** The app's pages for Better Auth's links: the `url` of each AuthenticationModule feature. */
+const pages = {
+	passwordReset: { url: "http://app.test/reset-password" },
+	emailVerification: { url: "http://app.test/verify-email" },
+	magicLink: { url: "http://app.test/sign-in/magic" },
+};
+
+/** The `?token=` of a link a handler sent, checking it goes to `page`. */
+function tokenOf(link: string, page: string): string {
+	const url = new URL(link);
+	expect(`${url.origin}${url.pathname}`).toBe(page);
+	const token = url.searchParams.get("token");
+	expect(token).toBeTruthy();
+	return token as string;
+}
 
 /** Records the password reset links it is asked to send. */
 @Injectable()
-class TestPasswordResetHandler extends PasswordResetHandler {
+class TestPasswordResetHandler extends BetterAuthPasswordResetHandler {
 	readonly sent: PasswordResetLink[] = [];
-	findUser() {
-		return null;
+	constructor(registry: AuthenticationRegistry, betterAuth: BetterAuthService) {
+		super(registry, betterAuth);
+		registry.registerHandler("passwordReset", this);
 	}
 	send(link: PasswordResetLink) {
 		this.sent.push(link);
 	}
+}
+
+/**
+ * Takes over `passwordReset` from `TestPasswordResetHandler`, as a wrapper
+ * or a test double would: injecting it makes Nest create it first.
+ */
+@Injectable()
+class ReplacingPasswordResetHandler extends BetterAuthPasswordResetHandler {
+	readonly sent: PasswordResetLink[] = [];
+	constructor(
+		registry: AuthenticationRegistry,
+		betterAuth: BetterAuthService,
+		_first: TestPasswordResetHandler,
+	) {
+		super(registry, betterAuth);
+		registry.registerHandler("passwordReset", this, { replace: true });
+	}
+	send(link: PasswordResetLink) {
+		this.sent.push(link);
+	}
+}
+
+/** A plain Nest handler: Better Auth would never call it. */
+@Injectable()
+class PlainPasswordResetHandler extends PasswordResetHandler {
+	constructor(registry: AuthenticationRegistry) {
+		super();
+		registry.registerHandler("passwordReset", this);
+	}
+	findUser() {
+		return null;
+	}
+	send() {}
 	updatePassword() {}
 }
 
 /** Records the verification links it is asked to send. */
 @Injectable()
-class TestEmailVerificationHandler extends EmailVerificationHandler {
+class TestEmailVerificationHandler extends BetterAuthEmailVerificationHandler {
 	readonly sent: EmailVerificationLink[] = [];
+	constructor(registry: AuthenticationRegistry, betterAuth: BetterAuthService) {
+		super(registry, betterAuth);
+		registry.registerHandler("emailVerification", this);
+	}
 	send(link: EmailVerificationLink) {
 		this.sent.push(link);
-	}
-	markVerified() {
-		return true;
 	}
 }
 
 /** Records the magic links it is asked to send. */
 @Injectable()
-class TestMagicLinkHandler extends MagicLinkHandler {
+class TestMagicLinkHandler extends BetterAuthMagicLinkHandler {
 	readonly sent: MagicLink[] = [];
+	constructor(registry: AuthenticationRegistry, betterAuth: BetterAuthService) {
+		super(registry, betterAuth);
+		registry.registerHandler("magicLink", this);
+	}
 	send(link: MagicLink) {
 		this.sent.push(link);
-	}
-	resolveUser() {
-		return null;
 	}
 }
 
 describe("handlers e2e: email handlers", () => {
-	it("sends password reset links through the discovered PasswordResetHandler", async () => {
+	it("sends the app's reset page with Better Auth's token, which resets the password", async () => {
 		const originalSend = vi.fn();
 		const auth = createTestAuth({
 			emailAndPassword: { enabled: true, sendResetPassword: originalSend },
 		});
 		const { app } = await createTestApp({
 			auth,
+			authentication: { passwordReset: pages.passwordReset },
 			controllers: [],
 			providers: [TestPasswordResetHandler],
 		});
@@ -77,28 +136,42 @@ describe("handlers e2e: email handlers", () => {
 		try {
 			const { user } = await signUp(auth);
 			await auth.api.requestPasswordReset({
-				body: { email: user.email, redirectTo: "http://localhost/reset" },
+				body: { email: user.email, redirectTo: "http://app.test/signed-in" },
 			});
 
-			const handler = app.get(TestPasswordResetHandler);
-			expect(handler.sent).toHaveLength(1);
-			expect(handler.sent[0]).toMatchObject({
-				userId: user.id,
-				email: user.email,
-				url: expect.stringContaining("reset-password"),
-			});
-			expect(handler.sent[0].expiresAt.getTime()).toBeGreaterThan(Date.now());
+			const [link] = app.get(TestPasswordResetHandler).sent;
+			expect(link).toMatchObject({ userId: user.id, email: user.email });
+			expect(link.expiresAt.getTime()).toBeGreaterThan(Date.now());
+			// Better Auth's callbackURL rides along, for the page to use.
+			expect(new URL(link.url).searchParams.get("callbackURL")).toBe(
+				"http://app.test/signed-in",
+			);
 			// The Nest handler overrides the config's callback instead of composing: one email.
 			expect(originalSend).not.toHaveBeenCalled();
+
+			// What the page does: post the token and the new password to Better Auth.
+			const server = app.getHttpServer();
+			await request(server)
+				.post("/api/auth/reset-password")
+				.send({
+					token: tokenOf(link.url, pages.passwordReset.url),
+					newPassword: "a-brand-new-password",
+				})
+				.expect(200);
+			await request(server)
+				.post("/api/auth/sign-in/email")
+				.send({ email: user.email, password: "a-brand-new-password" })
+				.expect(200);
 		} finally {
 			await app.close();
 		}
 	});
 
-	it("sends verification links through the discovered EmailVerificationHandler", async () => {
+	it("sends the app's verification page with Better Auth's token, which verifies the address", async () => {
 		const auth = createTestAuth({ emailVerification: {} });
 		const { app } = await createTestApp({
 			auth,
+			authentication: { emailVerification: pages.emailVerification },
 			controllers: [],
 			providers: [TestEmailVerificationHandler],
 		});
@@ -107,24 +180,32 @@ describe("handlers e2e: email handlers", () => {
 			const { user } = await signUp(auth);
 			await auth.api.sendVerificationEmail({ body: { email: user.email } });
 
-			const handler = app.get(TestEmailVerificationHandler);
-			expect(handler.sent.at(-1)).toMatchObject({
-				userId: user.id,
-				email: user.email,
-				url: expect.stringContaining("verify-email"),
-			});
+			const link = app.get(TestEmailVerificationHandler).sent.at(-1);
+			expect(link).toMatchObject({ userId: user.id, email: user.email });
+
+			// What the page does: hand the token to Better Auth.
+			const token = tokenOf(link?.url ?? "", pages.emailVerification.url);
+			await request(app.getHttpServer())
+				.get("/api/auth/verify-email")
+				.query({ token })
+				.expect(200);
+			const ctx = await auth.$context;
+			expect(
+				(await ctx.internalAdapter.findUserById(user.id))?.emailVerified,
+			).toBe(true);
 		} finally {
 			await app.close();
 		}
 	});
 
-	it("sends magic links through the discovered MagicLinkHandler", async () => {
+	it("sends the app's magic link page with Better Auth's token, which signs the user in", async () => {
 		const auth = createTestAuth({
 			baseURL: "http://localhost:3000",
 			plugins: [magicLink({ sendMagicLink: fromNestHandler })],
 		});
 		const { app } = await createTestApp({
 			auth,
+			authentication: { magicLink: pages.magicLink },
 			controllers: [],
 			providers: [TestMagicLinkHandler],
 		});
@@ -139,10 +220,14 @@ describe("handlers e2e: email handlers", () => {
 
 			const handler = app.get(TestMagicLinkHandler);
 			expect(handler.sent).toHaveLength(1);
-			expect(handler.sent[0]).toMatchObject({
-				email,
-				url: expect.stringContaining("magic-link"),
-			});
+			expect(handler.sent[0].email).toBe(email);
+
+			// What the page does: hand the token to Better Auth.
+			const token = tokenOf(handler.sent[0].url, pages.magicLink.url);
+			const response = await request(app.getHttpServer())
+				.get("/api/auth/magic-link/verify")
+				.query({ token });
+			expect(String(response.headers["set-cookie"])).toContain("session_token");
 		} finally {
 			await app.close();
 		}
@@ -154,114 +239,126 @@ describe("handlers e2e: email handlers", () => {
 		await expect(
 			createTestApp({
 				auth,
+				authentication: { passwordReset: pages.passwordReset },
 				controllers: [],
 				providers: [TestPasswordResetHandler],
 			}),
 		).rejects.toThrow(/emailAndPassword/);
 	});
 
-	it("does not require Nest's own password reset feature to be configured", async () => {
-		// AuthenticationModule.forRoot() has no `passwordReset` option here, which
-		// would make the registry refuse a registered handler.
+	it("sends through whichever handler the registry holds", async () => {
 		const auth = createTestAuth();
 		const { app } = await createTestApp({
 			auth,
+			authentication: { passwordReset: pages.passwordReset },
+			controllers: [],
+			providers: [TestPasswordResetHandler, ReplacingPasswordResetHandler],
+		});
+
+		try {
+			const { user } = await signUp(auth);
+			await auth.api.requestPasswordReset({
+				body: { email: user.email, redirectTo: "http://app.test/signed-in" },
+			});
+
+			expect(app.get(ReplacingPasswordResetHandler).sent).toHaveLength(1);
+			expect(app.get(TestPasswordResetHandler).sent).toHaveLength(0);
+		} finally {
+			await app.close();
+		}
+	});
+
+	it("refuses a plain Nest handler, which can't plug itself into Better Auth", async () => {
+		await expect(
+			createTestApp({
+				auth: createTestAuth(),
+				authentication: { passwordReset: pages.passwordReset },
+				controllers: [],
+				providers: [PlainPasswordResetHandler],
+			}),
+		).rejects.toThrow(/extend BetterAuthPasswordResetHandler/);
+	});
+
+	it("puts Better Auth's own callback back when the app closes", async () => {
+		const originalSend = vi.fn();
+		const auth = createTestAuth({
+			emailAndPassword: { enabled: true, sendResetPassword: originalSend },
+		});
+		const { app } = await createTestApp({
+			auth,
+			authentication: { passwordReset: pages.passwordReset },
 			controllers: [],
 			providers: [TestPasswordResetHandler],
 		});
+		expect(auth.options.emailAndPassword?.sendResetPassword).not.toBe(
+			originalSend,
+		);
 		await app.close();
+		expect(auth.options.emailAndPassword?.sendResetPassword).toBe(originalSend);
 	});
-});
 
-describe("handlers e2e: OidcAccountResolver", () => {
-	/** Records what it is asked to resolve, and allows or refuses links as configured. */
-	@Injectable()
-	class TestOidcResolver extends OidcAccountResolver {
-		readonly calls: unknown[][] = [];
-		allow = true;
-		resolveUser(...args: [unknown, unknown, unknown]) {
-			this.calls.push(args);
-			return this.allow
-				? { id: (args[0] as { subject: string }).subject }
-				: null;
-		}
-	}
+	it("needs its feature in the AuthenticationModule options, as every Nest handler", async () => {
+		await expect(
+			createTestApp({
+				auth: createTestAuth(),
+				controllers: [],
+				providers: [TestPasswordResetHandler],
+			}),
+		).rejects.toThrow(/`passwordReset` option is missing/);
+	});
 
-	/** Links a GitHub account to `userId`, which runs the account `before` hook. */
-	const linkGithub = async (
-		auth: ReturnType<typeof createTestAuth>,
-		userId: string,
-		accountId: string,
-	) => {
-		const ctx = await auth.$context;
-		return ctx.internalAdapter.linkAccount({
-			userId,
-			providerId: "github",
-			accountId,
-			accessToken: "token",
-		});
-	};
+	it("refuses Nest's options for the tokens: Better Auth's config sets them", async () => {
+		await expect(
+			createTestApp({
+				auth: createTestAuth(),
+				authentication: {
+					passwordReset: { ...pages.passwordReset, ttl: "2h" },
+				},
+				controllers: [],
+				providers: [TestPasswordResetHandler],
+			}),
+		).rejects.toThrow(/resetPasswordTokenExpiresIn/);
+	});
 
-	it("lets the resolver decide which user an external identity links to", async () => {
+	it("refuses Nest's own flow: Better Auth runs password resets", async () => {
 		const auth = createTestAuth();
 		const { app } = await createTestApp({
 			auth,
+			authentication: { passwordReset: pages.passwordReset },
 			controllers: [],
-			providers: [TestOidcResolver],
+			providers: [TestPasswordResetHandler],
 		});
 
 		try {
-			const { user } = await signUp(auth);
-			const resolver = app.get(TestOidcResolver);
-
-			// Resolves to the same user: allowed.
-			expect(await linkGithub(auth, user.id, user.id)).toBeTruthy();
-			expect(resolver.calls[0][0]).toMatchObject({
-				provider: "github",
-				subject: user.id,
-				email: user.email,
-			});
-			expect(resolver.calls[0][1]).toMatchObject({ accessToken: "token" });
-
-			// Resolves to somebody else, or to nobody: refused with an error, which
-			// also stops Better Auth from creating a new user without the account.
-			const other = await signUp(auth);
 			await expect(
-				linkGithub(auth, other.user.id, "someone-else"),
-			).rejects.toMatchObject({ statusCode: 403 });
-			resolver.allow = false;
-			await expect(
-				linkGithub(auth, other.user.id, "unknown"),
-			).rejects.toMatchObject({ statusCode: 403 });
-			const accounts = await (await auth.$context).internalAdapter.findAccounts(
-				other.user.id,
-			);
-			expect(accounts.map((account) => account.providerId)).toEqual([
-				"credential",
-			]);
+				// A well-formed token: Nest then reads its EmailTokenStore.
+				app
+					.get(PasswordResetService)
+					.reset("a".repeat(43), "new-password-123"),
+			).rejects.toThrow(/Better Auth/);
 		} finally {
 			await app.close();
 		}
 	});
 
-	it("composes with the config's own databaseHooks", async () => {
-		const before = vi.fn();
-		const auth = createTestAuth({
-			databaseHooks: { account: { create: { before } } },
-		});
-		const { app } = await createTestApp({
-			auth,
-			controllers: [],
-			providers: [TestOidcResolver],
-		});
-
-		try {
-			const { user } = await signUp(auth);
-			await linkGithub(auth, user.id, user.id);
-			expect(before).toHaveBeenCalled();
-		} finally {
+	it("starts in production: the features' stores are Better Auth's, not in memory", async () => {
+		await withEnv({ NODE_ENV: "production" }, async () => {
+			const auth = createTestAuth({
+				emailVerification: {},
+				plugins: [magicLink({ sendMagicLink: fromNestHandler })],
+			});
+			const { app } = await createTestApp({
+				auth,
+				authentication: pages,
+				controllers: [],
+				providers: [
+					TestPasswordResetHandler,
+					TestEmailVerificationHandler,
+					TestMagicLinkHandler,
+				],
+			});
 			await app.close();
-		}
+		});
 	});
 });
 

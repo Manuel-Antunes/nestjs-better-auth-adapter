@@ -1,6 +1,15 @@
+import { Inject, Injectable } from "@nestjs/common";
+import type { AuthenticationResult } from "@nestjs/authentication";
+import { APIError } from "better-auth/api";
 import { magicLink } from "better-auth/plugins/magic-link";
 import { twoFactor } from "better-auth/plugins/two-factor";
 import request from "supertest";
+import {
+	type AuthHookContext,
+	BeforeHook,
+	BetterAuthService,
+	Hook,
+} from "../../src/index.ts";
 import { nestjs } from "../../src/plugin/index.ts";
 import {
 	createTestApp,
@@ -294,6 +303,131 @@ describe("mfa e2e: what doesn't count as a second factor", () => {
 		} finally {
 			await app.close();
 		}
+	});
+});
+
+/** A step-up rule on Better Auth's own routes, as an app writes one. */
+@Hook()
+@Injectable()
+class StepUpHooks {
+	/** What `authenticate()` resolved, request after request. */
+	readonly seen: (AuthenticationResult | null)[] = [];
+
+	constructor(
+		@Inject(BetterAuthService) private readonly betterAuth: BetterAuthService,
+	) {}
+
+	@BeforeHook("/revoke-other-sessions")
+	async requireSecondFactor(ctx: AuthHookContext) {
+		const signedIn = await this.betterAuth.authenticate(ctx);
+		this.seen.push(signedIn);
+		if (signedIn && signedIn.mfa !== "verified")
+			throw new APIError("UNAUTHORIZED", { code: "MFA_REQUIRED" });
+	}
+
+	@BeforeHook("/list-sessions")
+	async observe(ctx: AuthHookContext) {
+		this.seen.push(await this.betterAuth.authenticate(ctx));
+	}
+}
+
+describe("mfa e2e: BetterAuthService.authenticate() in Better Auth's hooks", () => {
+	let auth: TestAuth;
+	let setup: Awaited<ReturnType<typeof createTestApp>>;
+	let hooks: StepUpHooks;
+
+	beforeAll(async () => {
+		auth = createTestAuth({
+			plugins: [twoFactor({ skipVerificationOnEnable: true })],
+		});
+		setup = await createTestApp({ auth, providers: [StepUpHooks] });
+		hooks = setup.app.get(StepUpHooks);
+	});
+
+	afterAll(async () => {
+		vi.restoreAllMocks();
+		await setup.app.close();
+	});
+
+	const server = () => setup.app.getHttpServer();
+	const revokeOthers = (token: string) =>
+		request(server())
+			.post("/api/auth/revoke-other-sessions")
+			.set("Authorization", `Bearer ${token}`)
+			.send({});
+
+	it("answers what @Authenticate({ mfa: true }) sees, for a bearer() token too", async () => {
+		const signedUp = await signUp(auth, { password });
+		const { user } = signedUp;
+		// Enabling two-factor replaces the session: the client adopts the new token.
+		const enabled = await request(server())
+			.post("/api/auth/two-factor/enable")
+			.set("Authorization", `Bearer ${signedUp.token}`)
+			.send({ password })
+			.expect(200);
+		const token =
+			(enabled.headers["set-auth-token"] as string | undefined) ??
+			(signedUp.token as string);
+		const { backupCodes } = enabled.body as { backupCodes: string[] };
+
+		const refused = await revokeOthers(token).expect(401);
+		expect(refused.body.code).toBe("MFA_REQUIRED");
+		expect(hooks.seen.at(-1)).toMatchObject({ user: { id: user.id } });
+		expect(hooks.seen.at(-1)?.mfa).toBeUndefined();
+		await request(server())
+			.get("/test/mfa")
+			.set("Authorization", `Bearer ${token}`)
+			.expect(401);
+
+		const verified = await request(server())
+			.post("/api/auth/two-factor/verify-backup-code")
+			.set("Authorization", `Bearer ${token}`)
+			.send({ code: backupCodes[0] })
+			.expect(200);
+		const current = (verified.headers["set-auth-token"] as string) || token;
+
+		await revokeOthers(current).expect(200);
+		expect(hooks.seen.at(-1)?.mfa).toBe("verified");
+		await request(server())
+			.get("/test/mfa")
+			.set("Authorization", `Bearer ${current}`)
+			.expect(200);
+	});
+
+	it("resolves the session once per request: the endpoint reuses it", async () => {
+		const { token, user } = await signUp(auth, { password });
+		const ctx = await auth.$context;
+		const findSession = vi.spyOn(ctx.internalAdapter, "findSession");
+
+		const listed = await request(server())
+			.get("/api/auth/list-sessions")
+			.set("Authorization", `Bearer ${token}`)
+			.expect(200);
+		expect(listed.body).toHaveLength(1);
+		expect(hooks.seen.at(-1)).toMatchObject({ user: { id: user.id } });
+		expect(findSession).toHaveBeenCalledTimes(1);
+		findSession.mockRestore();
+	});
+
+	it("is null without a session, and leaves the answer to Better Auth", async () => {
+		const refused = await request(server())
+			.post("/api/auth/revoke-other-sessions")
+			.send({})
+			.expect(401);
+		expect(refused.body.code).not.toBe("MFA_REQUIRED");
+		expect(hooks.seen.at(-1)).toBeNull();
+	});
+
+	it("takes the request's headers outside a hook", async () => {
+		const { token, user } = await signUp(auth, { password });
+		const signedIn = await setup.app
+			.get(BetterAuthService)
+			.authenticate(new Headers({ Authorization: `Bearer ${token}` }));
+		expect(signedIn).toMatchObject({ user: { id: user.id } });
+		expect(signedIn?.mfa).toBeUndefined();
+		expect(
+			await setup.app.get(BetterAuthService).authenticate(new Headers()),
+		).toBeNull();
 	});
 });
 

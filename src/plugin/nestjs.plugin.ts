@@ -5,13 +5,18 @@ import {
 	isAPIError,
 } from "better-auth/api";
 import { setSessionCookie } from "better-auth/cookies";
-import {
-	type AuthHookContext,
-	type BridgeHook,
-	NEST_BRIDGE,
-	type NestBridge,
-} from "./bridge.ts";
-import { type BetterAuthPassword, UPGRADE_HASH } from "./password.ts";
+import { NEST_BRIDGE } from "./bridge.ts";
+import type {
+	AuthHookContext,
+	BridgeHook,
+	NestBridge,
+} from "./interfaces/bridge.interface.ts";
+import type {
+	NestjsPluginOptions,
+	TwoFactorPlugin,
+} from "./interfaces/nestjs-plugin-options.interface.ts";
+import type { BetterAuthPassword } from "./interfaces/password.interface.ts";
+import { UPGRADE_HASH } from "./password.constants.ts";
 
 /** The `twoFactor()` endpoints that verify a second factor. */
 const SECOND_FACTOR_PATHS = new Set([
@@ -27,16 +32,19 @@ const CHALLENGED_SIGN_IN_PATHS = new Set([
 	"/sign-in/phone-number",
 ]);
 
-type TwoFactorPlugin = {
-	shouldRequireTwoFactor?: (ctx: AuthHookContext) => Promise<boolean>;
-};
-
 /**
  * Whether the request's verification counts as a second factor, decided
  * before the endpoint runs: the user must have had two-factor enabled, and
  * for TOTP and backup codes a confirmed authenticator. Confirming a new
  * authenticator proves nothing about who holds the session: a stolen
  * password-less session could enroll its own.
+ *
+ * Nothing here outlives a request, so it holds on serverless and with many
+ * instances: the key is `ctx.context`, which Better Auth creates for each
+ * endpoint call and passes to that call's before and after hooks, and the
+ * entry goes with it. What lasts is `mfaVerifiedAt`, in the database. Were
+ * the after hook ever to see another context, it would find no entry and
+ * mark nothing: a verification gets lost, never invented.
  */
 const counts = new WeakMap<object, boolean>();
 
@@ -142,21 +150,11 @@ const markSecondFactor = createAuthMiddleware(async (ctx) => {
 	await markVerified(ctx, newSession.session.token, newSession.user);
 });
 
-export interface NestjsPluginOptions {
-	/**
-	 * Record on each session whether its second factor was verified
-	 * (`session.mfaVerifiedAt`), which `@Authenticate({ mfa: true })` reads.
-	 * Adds a column to the session table.
-	 * @default true
-	 */
-	mfa?: boolean;
-}
-
 /**
  * Connects Better Auth to `BetterAuthModule`. Add it to `plugins`:
  *
- * - `@Hook()` and `@DatabaseHook()` providers, and an `OidcAccountResolver`,
- *   run through it, without `hooks` or `databaseHooks` in the config;
+ * - `@Hook()` and `@DatabaseHook()` providers run through it, without
+ *   `hooks` or `databaseHooks` in the config;
  * - it records a verified second factor on the session (`mfaVerifiedAt`);
  * - it lets `betterAuthPassword()` and `nestPasswordHasher()` upgrade
  *   outdated password hashes.

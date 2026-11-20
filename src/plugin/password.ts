@@ -1,36 +1,11 @@
 import type { PasswordHasher } from "@nestjs/authentication";
 import { verifyPassword as verifyBetterAuthHash } from "better-auth/crypto";
-
-export interface BetterAuthPasswordOptions {
-	/**
-	 * Keep verifying the `salt:key` hashes Better Auth writes by default, so
-	 * users who signed up before the switch can still sign in. Their hash is
-	 * upgraded the next time their password is verified.
-	 * @default true
-	 */
-	legacyHashes?: boolean;
-}
-
-/**
- * @internal Set by the `nestjs()` plugin: stores `upgraded` in place of the
- * credential hash `outdated`, if it is still that one.
- */
-export const UPGRADE_HASH = Symbol.for(
-	"nestjs-better-auth-adapter:upgrade-hash",
-);
-
-/** @internal How `BetterAuthModule` binds a {@link nestPasswordHasher} placeholder. */
-export const BIND_PASSWORD_HASHER = Symbol.for(
-	"nestjs-better-auth-adapter:bind-password-hasher",
-);
-
-/** `emailAndPassword.password` for Better Auth. */
-export type BetterAuthPassword = {
-	hash: (password: string) => Promise<string>;
-	verify: (data: { hash: string; password: string }) => Promise<boolean>;
-	[UPGRADE_HASH]?: (outdated: string, upgraded: string) => Promise<void>;
-	[BIND_PASSWORD_HASHER]?: (hasher: PasswordHasher) => void;
-};
+import { BetterAuthConfigurationError } from "../errors/better-auth-configuration.error.ts";
+import type {
+	BetterAuthPassword,
+	BetterAuthPasswordOptions,
+} from "./interfaces/password.interface.ts";
+import { BIND_PASSWORD_HASHER, UPGRADE_HASH } from "./password.constants.ts";
 
 /**
  * Hashes with Nest's `PasswordHasher`. A password verified against an
@@ -112,7 +87,7 @@ export function nestPasswordHasher(
 	let bound: PasswordHasher | undefined;
 	const password = nestPassword(() => {
 		if (!bound)
-			throw new Error(
+			throw new BetterAuthConfigurationError(
 				"nestPasswordHasher() is not bound: import BetterAuthModule and AuthenticationModule so it can use Nest's PasswordHasher.",
 			);
 		return bound;

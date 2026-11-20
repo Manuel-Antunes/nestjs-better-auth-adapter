@@ -1,0 +1,730 @@
+import {
+	createHash,
+	generateKeyPairSync,
+	randomBytes,
+	randomUUID,
+	sign,
+} from "node:crypto";
+import { oauthProvider } from "@better-auth/oauth-provider";
+import {
+	type ArgumentsHost,
+	Catch,
+	Controller,
+	type ExceptionFilter,
+	Get,
+	type HttpException,
+	Inject,
+	Injectable,
+	UseFilters,
+} from "@nestjs/common";
+import {
+	AuthenticationError,
+	AuthenticationRegistry,
+	CurrentSession,
+	CurrentUser,
+} from "@nestjs/authentication";
+import { jwt } from "better-auth/plugins/jwt";
+import request from "supertest";
+import {
+	type BetterAuthOAuthAccessToken,
+	BetterAuthOAuthProvider,
+	BetterAuthOAuthProviderModule,
+	type BetterAuthOAuthProviderOptions,
+	OAuthAccessTokenError,
+	OAuthAccessTokenNotAcceptedError,
+	OAuthInsufficientScopeError,
+	OAuthScopes,
+} from "../../src/oauth-provider/index.ts";
+import { createTestApp, createTestAuth, uniqueEmail } from "../shared/app.ts";
+
+const ORIGIN = "http://localhost:3000";
+const ISSUER = `${ORIGIN}/api/auth`;
+/** This API, as a resource server. */
+const API = `${ORIGIN}/api`;
+const REDIRECT = "https://client.test/callback";
+const METADATA = `${ORIGIN}/.well-known/oauth-protected-resource/api`;
+
+/** The app's OAuth provider for `options`, registered at `order`. */
+function oauthAuth(options: BetterAuthOAuthProviderOptions, order = 3) {
+	@Injectable()
+	class OAuthAuth extends BetterAuthOAuthProvider {
+		constructor(
+			@Inject(AuthenticationRegistry) registry: AuthenticationRegistry,
+		) {
+			super(options);
+			registry.registerProvider(this, { order });
+		}
+	}
+	return OAuthAuth;
+}
+
+/**
+ * What an app's filter sees: Nest's own 401/403, with this package's error
+ * as its `cause`.
+ */
+@Catch()
+class OAuthErrorFilter implements ExceptionFilter {
+	catch(exception: HttpException, host: ArgumentsHost) {
+		const cause = exception.cause;
+		const kind =
+			cause instanceof OAuthInsufficientScopeError
+				? { kind: "insufficient-scope", scopes: cause.scopes }
+				: cause instanceof OAuthAccessTokenNotAcceptedError
+					? { kind: "not-accepted" }
+					: cause instanceof OAuthAccessTokenError
+						? { kind: "bad-token", code: cause.code }
+						: { kind: "other" };
+		host
+			.switchToHttp()
+			.getResponse()
+			.status(exception.getStatus())
+			.send({
+				...kind,
+				authenticationError: cause instanceof AuthenticationError,
+			});
+	}
+}
+
+@Controller("api")
+class ApiController {
+	@UseFilters(new OAuthErrorFilter())
+	@OAuthScopes("read:post")
+	@Get("filtered/posts")
+	filteredPosts() {
+		return { ok: true };
+	}
+
+	@UseFilters(new OAuthErrorFilter())
+	@Get("filtered/account")
+	filteredAccount() {
+		return { ok: true };
+	}
+
+	@OAuthScopes("read:post")
+	@Get("posts")
+	posts(
+		@CurrentUser("id") userId: string,
+		@CurrentSession() session: BetterAuthOAuthAccessToken | { token: string },
+	) {
+		return { userId, session };
+	}
+
+	@OAuthScopes()
+	@Get("any-token")
+	anyToken(@CurrentUser("id") userId: string) {
+		return { userId };
+	}
+
+	/** No `@OAuthScopes()`: a first-party route. */
+	@Get("account")
+	account(@CurrentUser("id") userId: string) {
+		return { userId };
+	}
+}
+
+const createAuth = () =>
+	createTestAuth({
+		baseURL: ORIGIN,
+		disabledPaths: ["/token"],
+		plugins: [
+			// The audience of jwt()'s own JWTs is this API too: they share the
+			// keys, the issuer and the audience with the access tokens.
+			jwt({
+				disableSettingJwtHeader: true,
+				jwt: { issuer: ISSUER, audience: API },
+			}),
+			oauthProvider({
+				loginPage: "/sign-in",
+				consentPage: "/consent",
+				scopes: ["openid", "profile", "email", "offline_access", "read:post"],
+				resources: [API],
+				clientRegistrationDefaultResources: [API],
+				// Lets the tests set client_credentials_scopes.
+				clientPrivileges: () => true,
+			}),
+		],
+	});
+
+type Client = { client_id: string; client_secret: string };
+/** The plugin's API, which createTestAuth()'s type doesn't carry. */
+type OAuthApi = {
+	adminCreateOAuthClient(input: {
+		headers: Headers;
+		body: Record<string, unknown>;
+	}): Promise<unknown>;
+};
+
+describe("oauthProvider() through BetterAuthOAuthProviderModule", () => {
+	let app: Awaited<ReturnType<typeof createTestApp>>["app"];
+	let auth: ReturnType<typeof createAuth>;
+	let server: ReturnType<typeof app.getHttpServer>;
+
+	beforeAll(async () => {
+		auth = createAuth();
+		({ app } = await createTestApp({
+			auth,
+			imports: [BetterAuthOAuthProviderModule],
+			providers: [
+				oauthAuth({
+					audience: API,
+					resourceMetadata: { scopes_supported: ["read:post"] },
+				}),
+			],
+			controllers: [ApiController],
+		}));
+		server = app.getHttpServer();
+	});
+
+	afterAll(async () => {
+		await app.close();
+	});
+
+	/** A signed-in user: their session cookie. */
+	const signIn = async () => {
+		const response = await request(server)
+			.post("/api/auth/sign-up/email")
+			.send({ email: uniqueEmail(), password: "password1234", name: "User" });
+		const cookie = (response.headers["set-cookie"] as unknown as string[])
+			.map((value) => value.split(";")[0])
+			.join("; ");
+		return { cookie, userId: response.body.user.id as string };
+	};
+
+	const createClient = async (
+		cookie: string,
+		body: Record<string, unknown> = {},
+	): Promise<Client> =>
+		(await (auth.api as unknown as OAuthApi).adminCreateOAuthClient({
+			headers: new Headers({ cookie }),
+			body: {
+				redirect_uris: [REDIRECT],
+				skip_consent: true,
+				scope: "openid profile read:post",
+				...body,
+			},
+		})) as Client;
+
+	/** The authorization code flow, PKCE and all, without consent. */
+	const authorize = async (
+		user: { cookie: string },
+		client: Client,
+		{
+			scope,
+			resource,
+			dpop,
+		}: { scope: string; resource?: string; dpop?: DpopKey },
+	) => {
+		const verifier = randomBytes(32).toString("base64url");
+		const query = new URLSearchParams({
+			response_type: "code",
+			client_id: client.client_id,
+			redirect_uri: REDIRECT,
+			scope,
+			state: "state",
+			code_challenge: createHash("sha256").update(verifier).digest("base64url"),
+			code_challenge_method: "S256",
+			...(resource && { resource }),
+		});
+		const redirect = await request(server)
+			.get(`/api/auth/oauth2/authorize?${query}`)
+			.set("Cookie", user.cookie);
+		const code = new URL(redirect.headers.location as string).searchParams.get(
+			"code",
+		);
+		expect(code).toBeTruthy();
+
+		const token = request(server)
+			.post("/api/auth/oauth2/token")
+			.type("form")
+			.auth(client.client_id, client.client_secret);
+		if (dpop) token.set("DPoP", dpop.proof("POST", `${ISSUER}/oauth2/token`));
+		const response = await token.send({
+			grant_type: "authorization_code",
+			code,
+			redirect_uri: REDIRECT,
+			code_verifier: verifier,
+			...(resource && { resource }),
+		});
+		expect(response.status).toBe(200);
+		return response.body as {
+			access_token: string;
+			id_token?: string;
+			token_type: string;
+		};
+	};
+
+	describe("discovery", () => {
+		it("serves RFC 8414's metadata at the root, outside the base path", async () => {
+			const response = await request(server).get(
+				"/.well-known/oauth-authorization-server/api/auth",
+			);
+			expect(response.status).toBe(200);
+			expect(response.body.issuer).toBe(ISSUER);
+			expect(response.body.token_endpoint).toBe(`${ISSUER}/oauth2/token`);
+		});
+
+		it("serves the issuer's own documents", async () => {
+			for (const path of [
+				"/api/auth/.well-known/openid-configuration",
+				"/api/auth/.well-known/oauth-authorization-server",
+			]) {
+				const response = await request(server).get(path);
+				expect(response.status).toBe(200);
+				expect(response.body.issuer).toBe(ISSUER);
+			}
+		});
+
+		it("serves this API's protected resource metadata (RFC 9728), to any origin", async () => {
+			const response = await request(server)
+				.get("/.well-known/oauth-protected-resource/api")
+				.set("Origin", "https://elsewhere.test");
+			expect(response.status).toBe(200);
+			expect(response.headers["access-control-allow-origin"]).toBe("*");
+			expect(response.body).toMatchObject({
+				resource: API,
+				authorization_servers: [ISSUER],
+				bearer_methods_supported: ["header"],
+				scopes_supported: ["read:post"],
+			});
+
+			const preflight = await request(server)
+				.options("/.well-known/oauth-protected-resource/api")
+				.set("Origin", "https://elsewhere.test")
+				.set("Access-Control-Request-Method", "GET")
+				.set("Access-Control-Request-Headers", "mcp-protocol-version");
+			expect(preflight.status).toBe(204);
+			expect(preflight.headers["access-control-allow-origin"]).toBe("*");
+		});
+
+		it("leaves other well-known paths to the app", async () => {
+			const response = await request(server).get(
+				"/.well-known/oauth-authorization-server/elsewhere",
+			);
+			expect(response.status).toBe(404);
+			expect(response.body.statusCode).toBe(404); // Nest's, not Better Auth's
+		});
+	});
+
+	describe("access tokens on Nest routes", () => {
+		it("authenticates the user who granted the token, on a route asking for its scopes", async () => {
+			const user = await signIn();
+			const client = await createClient(user.cookie);
+			const { access_token } = await authorize(user, client, {
+				scope: "openid read:post",
+				resource: API,
+			});
+
+			const response = await request(server)
+				.get("/api/posts")
+				.set("Authorization", `Bearer ${access_token}`);
+			expect(response.status).toBe(200);
+			expect(response.body.userId).toBe(user.userId);
+			expect(response.body.session).toMatchObject({
+				sub: user.userId,
+				azp: client.client_id,
+				scopes: ["openid", "read:post"],
+			});
+
+			const any = await request(server)
+				.get("/api/any-token")
+				.set("Authorization", `Bearer ${access_token}`);
+			expect(any.status).toBe(200);
+		});
+
+		it("refuses them on routes without @OAuthScopes(), even when jwt() would accept them", async () => {
+			const user = await signIn();
+			const client = await createClient(user.cookie);
+			const { access_token } = await authorize(user, client, {
+				scope: "openid read:post",
+				resource: API,
+			});
+
+			const response = await request(server)
+				.get("/api/account")
+				.set("Authorization", `Bearer ${access_token}`);
+			expect(response.status).toBe(403);
+			expect(response.body.errorCode).toBe("access_token_not_accepted");
+		});
+
+		it("answers a missing scope with RFC 6750's insufficient_scope challenge", async () => {
+			const user = await signIn();
+			const client = await createClient(user.cookie);
+			const { access_token } = await authorize(user, client, {
+				scope: "openid profile",
+				resource: API,
+			});
+
+			const response = await request(server)
+				.get("/api/posts")
+				.set("Authorization", `Bearer ${access_token}`);
+			expect(response.status).toBe(403);
+			expect(response.body.errorCode).toBe("insufficient_scope");
+			expect(response.body.details).toEqual({ scope: "read:post" });
+			const challenge = response.headers["www-authenticate"];
+			expect(challenge).toContain('error="insufficient_scope"');
+			expect(challenge).toContain('scope="read:post"');
+			expect(challenge).toContain(`resource_metadata="${METADATA}"`);
+		});
+
+		it("points clients without credentials to the resource metadata", async () => {
+			const response = await request(server).get("/api/posts");
+			expect(response.status).toBe(401);
+			expect(response.headers["www-authenticate"]).toContain(
+				`Bearer resource_metadata="${METADATA}"`,
+			);
+		});
+
+		it("refuses a forged token with invalid_token", async () => {
+			const user = await signIn();
+			const client = await createClient(user.cookie);
+			const { access_token } = await authorize(user, client, {
+				scope: "openid read:post",
+				resource: API,
+			});
+			const [header, payload] = access_token.split(".");
+			const forged = `${header}.${payload}.${randomBytes(64).toString("base64url")}`;
+
+			const response = await request(server)
+				.get("/api/posts")
+				.set("Authorization", `Bearer ${forged}`);
+			expect(response.status).toBe(401);
+			expect(response.headers["www-authenticate"]).toContain(
+				'error="invalid_token"',
+			);
+		});
+
+		it("never takes an ID token for an access token", async () => {
+			const user = await signIn();
+			const client = await createClient(user.cookie);
+			const { id_token } = await authorize(user, client, {
+				scope: "openid read:post",
+				resource: API,
+			});
+			expect(id_token).toBeTruthy();
+
+			for (const path of ["/api/posts", "/api/account"]) {
+				const response = await request(server)
+					.get(path)
+					.set("Authorization", `Bearer ${id_token}`);
+				expect(response.status).toBe(401);
+			}
+		});
+
+		it("leaves tokens requested without this API as resource unauthenticated", async () => {
+			const user = await signIn();
+			const client = await createClient(user.cookie);
+			// Opaque: meant for the userinfo endpoint only.
+			const { access_token } = await authorize(user, client, {
+				scope: "openid read:post",
+			});
+
+			const response = await request(server)
+				.get("/api/posts")
+				.set("Authorization", `Bearer ${access_token}`);
+			expect(response.status).toBe(401);
+		});
+
+		it("refuses a token once the session it was granted from ended", async () => {
+			const user = await signIn();
+			const client = await createClient(user.cookie);
+			const { access_token } = await authorize(user, client, {
+				scope: "openid read:post",
+				resource: API,
+			});
+			const before = await request(server)
+				.get("/api/posts")
+				.set("Authorization", `Bearer ${access_token}`);
+			expect(before.status).toBe(200);
+			expect(before.body.session.sid).toBeTruthy();
+
+			await request(server)
+				.post("/api/auth/sign-out")
+				.set("Cookie", user.cookie)
+				.set("Origin", ORIGIN)
+				.expect(200);
+
+			const after = await request(server)
+				.get("/api/posts")
+				.set("Authorization", `Bearer ${access_token}`);
+			expect(after.status).toBe(401);
+			expect(after.headers["www-authenticate"]).toContain(
+				'error="invalid_token"',
+			);
+		});
+
+		it("refuses client_credentials tokens, which have no user", async () => {
+			const user = await signIn();
+			const client = await createClient(user.cookie, {
+				grant_types: ["client_credentials"],
+				response_types: [],
+				scope: "read:post",
+				client_credentials_scopes: ["read:post"],
+			});
+			const token = await request(server)
+				.post("/api/auth/oauth2/token")
+				.type("form")
+				.auth(client.client_id, client.client_secret)
+				.send({
+					grant_type: "client_credentials",
+					scope: "read:post",
+					resource: API,
+				});
+			expect(token.status).toBe(200);
+
+			const response = await request(server)
+				.get("/api/posts")
+				.set("Authorization", `Bearer ${token.body.access_token}`);
+			expect(response.status).toBe(403);
+			expect(response.body.errorCode).toBe("user_required");
+		});
+
+		it("verifies DPoP-bound tokens against the proof for this request", async () => {
+			const user = await signIn();
+			const client = await createClient(user.cookie);
+			const key = dpopKey();
+			const { access_token, token_type } = await authorize(user, client, {
+				scope: "openid read:post",
+				resource: API,
+				dpop: key,
+			});
+			expect(token_type).toBe("DPoP");
+
+			const call = (proof?: string, scheme = "DPoP") => {
+				const call = request(server)
+					.get("/api/posts")
+					.set("Host", "localhost:3000")
+					.set("Authorization", `${scheme} ${access_token}`);
+				return proof ? call.set("DPoP", proof) : call;
+			};
+
+			const ok = await call(key.proof("GET", `${API}/posts`, access_token));
+			expect(ok.status).toBe(200);
+			expect(ok.body.userId).toBe(user.userId);
+
+			// A proof for another URL, none at all, or the token as a Bearer one.
+			expect(
+				(await call(key.proof("GET", `${API}/other`, access_token))).status,
+			).toBe(401);
+			expect((await call()).status).toBe(401);
+			expect(
+				(await call(key.proof("GET", `${API}/posts`, access_token), "Bearer"))
+					.status,
+			).toBe(401);
+		});
+
+		it("hands its errors to the app's exception filters, as the cause", async () => {
+			const user = await signIn();
+			const client = await createClient(user.cookie);
+			const { access_token } = await authorize(user, client, {
+				scope: "openid profile",
+				resource: API,
+			});
+			const call = (path: string, token = access_token) =>
+				request(server).get(path).set("Authorization", `Bearer ${token}`);
+
+			const scope = await call("/api/filtered/posts");
+			expect(scope.status).toBe(403);
+			expect(scope.body).toEqual({
+				kind: "insufficient-scope",
+				scopes: ["read:post"],
+				authenticationError: true,
+			});
+
+			const notAccepted = await call("/api/filtered/account");
+			expect(notAccepted.status).toBe(403);
+			expect(notAccepted.body.kind).toBe("not-accepted");
+
+			const [header, payload] = access_token.split(".");
+			const forged = await call(
+				"/api/filtered/posts",
+				`${header}.${payload}.${randomBytes(64).toString("base64url")}`,
+			);
+			expect(forged.status).toBe(401);
+			expect(forged.body).toEqual({
+				kind: "bad-token",
+				code: "invalid_token",
+				authenticationError: true,
+			});
+		});
+
+		it("keeps the session cookie working on routes with @OAuthScopes()", async () => {
+			const user = await signIn();
+			const response = await request(server)
+				.get("/api/posts")
+				.set("Cookie", user.cookie);
+			expect(response.status).toBe(200);
+			expect(response.body.userId).toBe(user.userId);
+		});
+	});
+});
+
+describe("oauthProvider() without a BetterAuthOAuthProvider (an authorization server only)", () => {
+	it("serves discovery, and doesn't take access tokens for jwt() JWTs", async () => {
+		const auth = createAuth();
+		const { app } = await createTestApp({ auth, controllers: [ApiController] });
+		const server = app.getHttpServer();
+		try {
+			const discovery = await request(server).get(
+				"/.well-known/oauth-authorization-server/api/auth",
+			);
+			expect(discovery.status).toBe(200);
+			expect(
+				(await request(server).get("/.well-known/oauth-protected-resource/api"))
+					.status,
+			).toBe(404);
+
+			const signUp = await request(server)
+				.post("/api/auth/sign-up/email")
+				.send({ email: uniqueEmail(), password: "password1234", name: "User" });
+			const cookie = (signUp.headers["set-cookie"] as unknown as string[])
+				.map((value) => value.split(";")[0])
+				.join("; ");
+			const client = (await (
+				auth.api as unknown as OAuthApi
+			).adminCreateOAuthClient({
+				headers: new Headers({ cookie }),
+				body: {
+					redirect_uris: [REDIRECT],
+					skip_consent: true,
+					scope: "openid read:post",
+				},
+			})) as Client;
+			const verifier = randomBytes(32).toString("base64url");
+			const redirect = await request(server)
+				.get(
+					`/api/auth/oauth2/authorize?${new URLSearchParams({
+						response_type: "code",
+						client_id: client.client_id,
+						redirect_uri: REDIRECT,
+						scope: "openid read:post",
+						state: "state",
+						code_challenge: createHash("sha256")
+							.update(verifier)
+							.digest("base64url"),
+						code_challenge_method: "S256",
+						resource: API,
+					})}`,
+				)
+				.set("Cookie", cookie);
+			const token = await request(server)
+				.post("/api/auth/oauth2/token")
+				.type("form")
+				.auth(client.client_id, client.client_secret)
+				.send({
+					grant_type: "authorization_code",
+					code: new URL(redirect.headers.location as string).searchParams.get(
+						"code",
+					),
+					redirect_uri: REDIRECT,
+					code_verifier: verifier,
+					resource: API,
+				});
+			expect(token.status).toBe(200);
+
+			// jwt() checks the same keys, issuer and audience: only the token's
+			// type keeps it from passing for the user's whole session.
+			const response = await request(server)
+				.get("/api/account")
+				.set("Authorization", `Bearer ${token.body.access_token}`);
+			expect(response.status).toBe(401);
+		} finally {
+			await app.close();
+		}
+	});
+});
+
+describe("BetterAuthOAuthProvider settings", () => {
+	it("fails at startup without the oauthProvider() plugin", async () => {
+		await expect(
+			createTestApp({
+				auth: createTestAuth({ baseURL: ORIGIN, plugins: [jwt()] }),
+				imports: [BetterAuthOAuthProviderModule],
+				providers: [oauthAuth({ audience: API })],
+				controllers: [],
+			}),
+		).rejects.toThrow(/oauthProvider\(\)/);
+	});
+
+	it("fails at startup without BetterAuthOAuthProviderModule", async () => {
+		await expect(
+			createTestApp({
+				auth: createAuth(),
+				providers: [oauthAuth({ audience: API })],
+				controllers: [],
+			}),
+		).rejects.toThrow(/needs BetterAuthOAuthProviderModule/);
+	});
+
+	it("fails at startup with two providers serving one resource's metadata", async () => {
+		await expect(
+			createTestApp({
+				auth: createAuth(),
+				imports: [BetterAuthOAuthProviderModule],
+				providers: [
+					oauthAuth({ audience: API }),
+					oauthAuth({ audience: API }, 4),
+				],
+				controllers: [],
+			}),
+		).rejects.toThrow(/both serve the resource metadata/);
+	});
+
+	it("fails at startup on an audience that isn't an http(s) URL", async () => {
+		await expect(
+			createTestApp({
+				auth: createAuth(),
+				imports: [BetterAuthOAuthProviderModule],
+				providers: [oauthAuth({ audience: "urn:api" })],
+				controllers: [],
+			}),
+		).rejects.toThrow(/audience/);
+	});
+
+	it("fails at startup on resource metadata the plugin refuses", async () => {
+		await expect(
+			createTestApp({
+				auth: createAuth(),
+				imports: [BetterAuthOAuthProviderModule],
+				providers: [
+					oauthAuth({
+						audience: API,
+						resourceMetadata: { scopes_supported: ["unknown"] },
+					}),
+				],
+				controllers: [],
+			}),
+		).rejects.toThrow(/unknown/i);
+	});
+});
+
+type DpopKey = ReturnType<typeof dpopKey>;
+
+/** A client's DPoP key, signing proofs (RFC 9449) with ES256. */
+function dpopKey() {
+	const { privateKey, publicKey } = generateKeyPairSync("ec", {
+		namedCurve: "P-256",
+	});
+	const { kty, crv, x, y } = publicKey.export({ format: "jwk" });
+	const encode = (value: object) =>
+		Buffer.from(JSON.stringify(value)).toString("base64url");
+	return {
+		proof(method: string, url: string, accessToken?: string) {
+			const input = `${encode({ typ: "dpop+jwt", alg: "ES256", jwk: { kty, crv, x, y } })}.${encode(
+				{
+					jti: randomUUID(),
+					htm: method,
+					htu: url,
+					iat: Math.floor(Date.now() / 1000),
+					...(accessToken && {
+						ath: createHash("sha256").update(accessToken).digest("base64url"),
+					}),
+				},
+			)}`;
+			const signature = sign("sha256", Buffer.from(input), {
+				key: privateKey,
+				dsaEncoding: "ieee-p1363",
+			});
+			return `${input}.${signature.toString("base64url")}`;
+		},
+	};
+}

@@ -1,68 +1,123 @@
-import { type ExecutionContext, Inject, Injectable } from "@nestjs/common";
+import { type ExecutionContext, Inject } from "@nestjs/common";
 import {
 	AuthenticationProvider,
-	AuthenticationRegistry,
 	type AuthenticationResult,
 } from "@nestjs/authentication";
 import { fromNodeHeaders } from "better-auth/node";
-import {
-	BETTER_AUTH_MODULE_OPTIONS,
-	type BetterAuthModuleOptions,
-} from "../better-auth.module-definition.ts";
 import { BetterAuthService } from "../better-auth.service.ts";
-import type { BetterAuthSession, BetterAuthUser } from "../types.ts";
-import { getRequestFromContext } from "../utils.ts";
+import { BetterAuthSessionError } from "../errors/better-auth-session.error.ts";
+import { isCrossOriginWrite } from "../http/cross-origin.ts";
+import { appendSetCookies } from "../http/set-cookie.ts";
+import { cachedOriginCheck } from "../http/trusted-origins-cors.ts";
+import type {
+	BetterAuthSession,
+	BetterAuthUser,
+} from "../interfaces/better-auth-session.interface.ts";
+import { getAuthRequest, getResponseFromContext } from "../utils.ts";
+import { assertNotBanned, checksBans } from "./banned-user.ts";
+import { sessionAuthentication } from "./session-authentication.ts";
 
 /**
- * Authenticates with Better Auth's session: the session cookie, and a Bearer
+ * Base class for Better Auth's session: the session cookie, and a Bearer
  * token too with the `bearer()` plugin, since `getSession()` reads both.
+ * Extend it and register it, as Nest's `SessionCookieProvider`;
+ * `BetterAuthService` is property-injected, so the subclass constructor
+ * only lists its own dependencies:
+ *
+ * ```ts
+ * @Injectable()
+ * export class SessionAuth extends BetterAuthSessionProvider {
+ *   constructor(registry: AuthenticationRegistry) {
+ *     super();
+ *     registry.registerProvider(this, { order: 0 });
+ *   }
+ * }
+ * ```
+ *
  * `@CurrentSession()` is Better Auth's session, additional fields and
- * plugin fields (`activeOrganizationId`…) included.
+ * plugin fields (`activeOrganizationId`…) included. The cookies
+ * `getSession()` sets go out with the response, as on Better Auth's own
+ * routes: the session's sliding expiry (`updateAge`), the cookie cache once
+ * it lapsed, the cookies of an ended session cleared.
+ *
+ * As with `SessionCookieProvider`, the cookie on a cross-origin POST, PUT,
+ * PATCH or DELETE, or on a cross-origin WebSocket handshake, counts as no
+ * credentials, unless Better Auth trusts the origin (`trustedOrigins`).
+ * Over WebSockets it reads socket.io's handshake, or the upgrade request
+ * `WsAuthenticator` keeps on a `ws` client.
  *
  * A session satisfies `@Authenticate({ mfa: true })` once the `nestjs()`
  * plugin recorded a verified second factor on it (`mfaVerifiedAt`), never
  * because the user enrolled one: `twoFactor()` does not challenge magic
  * link, social or OAuth sign-ins.
  */
-@Injectable()
-export class BetterAuthSessionProvider extends AuthenticationProvider<
+export abstract class BetterAuthSessionProvider extends AuthenticationProvider<
 	BetterAuthUser,
 	BetterAuthSession
 > {
-	constructor(
-		@Inject(BetterAuthService) private readonly betterAuth: BetterAuthService,
-		@Inject(BETTER_AUTH_MODULE_OPTIONS) options: BetterAuthModuleOptions,
-		@Inject(AuthenticationRegistry) registry: AuthenticationRegistry,
-	) {
-		super();
-		const settings = options.providers?.session;
-		if (settings !== false) {
-			registry.registerProvider(this, { order: settings?.order ?? 0 });
-		}
-	}
+	@Inject(BetterAuthService) protected readonly betterAuth!: BetterAuthService;
+	#checkBans?: boolean;
+	#isTrustedOrigin?: Promise<(origin: string) => boolean>;
 
 	async authenticate(
 		context: ExecutionContext,
 	): Promise<AuthenticationResult<BetterAuthUser, BetterAuthSession> | null> {
-		const request = await getRequestFromContext(context);
-		const result = await this.betterAuth.api.getSession({
-			headers: fromNodeHeaders(
-				request?.headers ?? request?.handshake?.headers ?? {},
-			),
+		const request = await getAuthRequest(context);
+		if (!request) return null;
+		const requestHeaders = fromNodeHeaders(request.headers);
+		// The cookie on a write, or a WebSocket handshake, from an origin Better
+		// Auth doesn't trust is ignored, as SessionCookieProvider does (CSRF,
+		// cross-site WebSocket hijacking). A Bearer token still counts.
+		if (
+			requestHeaders.has("cookie") &&
+			isCrossOriginWrite(request, await this.isTrustedOrigin())
+		)
+			requestHeaders.delete("cookie");
+		const { headers, response: result } = await this.betterAuth.api.getSession({
+			headers: requestHeaders,
+			returnHeaders: true,
 		});
+		const cookies = headers?.getSetCookie?.() ?? [];
+		if (cookies.length > 0)
+			appendSetCookies(
+				(await getResponseFromContext(context)).response,
+				cookies,
+			);
 		// No credentials this provider understands: the guard tries the next one.
 		if (!result) return null;
 
 		const session = result.session as BetterAuthSession;
-		return {
-			user: result.user as BetterAuthUser,
-			session,
-			...(session.mfaVerifiedAt && { mfa: "verified" as const }),
-		};
+		const user = await this.validate(result.user as BetterAuthUser, session);
+		if (!user) throw new BetterAuthSessionError();
+		this.#checkBans ??= checksBans(this.betterAuth.instance);
+		if (this.#checkBans) assertNotBanned(user);
+		return sessionAuthentication(user, session);
+	}
+
+	/**
+	 * The user a valid session signs in, or `null` to refuse it (a 401).
+	 * Override it to add checks of your own; by default, the session's user.
+	 * Users the `admin()` plugin banned are refused after it, whatever it
+	 * returns.
+	 */
+	protected validate(
+		user: BetterAuthUser,
+		_session: BetterAuthSession,
+	): BetterAuthUser | null | Promise<BetterAuthUser | null> {
+		return user;
 	}
 
 	/** `WWW-Authenticate` challenge sent with a 401 when no provider found credentials. */
 	challenge(): string {
 		return "Cookie";
+	}
+
+	/** Better Auth's own origin check (`trustedOrigins`, wildcards included), remembered per origin. */
+	private isTrustedOrigin(): Promise<(origin: string) => boolean> {
+		this.#isTrustedOrigin ??= this.betterAuth.instance.$context.then(
+			(ctx: { isTrustedOrigin(origin: string): boolean }) =>
+				cachedOriginCheck((origin) => ctx.isTrustedOrigin(origin)),
+		);
+		return this.#isTrustedOrigin;
 	}
 }

@@ -1,24 +1,16 @@
-import { Inject } from "@nestjs/common";
 import type { ExecutionContext } from "@nestjs/common";
-import { BetterAuthService } from "../better-auth.service.ts";
-import type { BetterAuthACPolicyMetadata } from "../access-control.ts";
 import { BETTER_AUTH_AC_POLICY } from "../constants.ts";
-import type { BetterAuthUser } from "../types.ts";
+import { BetterAuthConfigurationError } from "../errors/better-auth-configuration.error.ts";
+import type { BetterAuthACPolicyMetadata } from "../interfaces/access-control.interface.ts";
+import type { BetterAuthUser } from "../interfaces/better-auth-session.interface.ts";
 import { getRequestFromContext } from "../utils.ts";
-import { memberHasPermission } from "./organization.ts";
-
-/**
- * A class standing for a resource, as CASL takes them: the resource is named
- * after its static `modelName` when it has one, else after the class name.
- */
-// biome-ignore lint/suspicious/noExplicitAny: any constructor, whatever its parameters
-export type ACPolicyResourceClass = abstract new (...args: any[]) => unknown;
-
-/**
- * What a policy is about: Better Auth's resource name (the statement key),
- * a symbol named by its description, or a class ({@link ACPolicyResourceClass}).
- */
-export type ACPolicyResource = string | symbol | ACPolicyResourceClass;
+import { BetterAuthPolicy } from "./better-auth.policy.ts";
+import type {
+	ACPolicyResource,
+	BetterAuthACPolicyClass,
+	BetterAuthACPolicyConfig,
+	BetterAuthOrganizationACPolicyClass,
+} from "./interfaces/ac-policy.interface.ts";
 
 /**
  * Better Auth's resource name for `resource`: the string itself, a symbol's
@@ -33,79 +25,19 @@ export function resourceNameOf(resource: ACPolicyResource): string {
 				? resource.description
 				: ((resource as { modelName?: unknown }).modelName ?? resource.name);
 	if (typeof name !== "string" || name === "")
-		throw new Error(
+		throw new BetterAuthConfigurationError(
 			`Can't name the resource of a policy from ${String(resource)}: use a non-empty string, a symbol with a description, or a named class.`,
 		);
 	return name;
 }
 
-/** The second argument of `BetterAuthACPolicy()` and `BetterAuthOrganizationACPolicy()`. */
-export interface BetterAuthACPolicyConfig<
-	TRole extends string,
-	TAction extends string,
-> {
-	/**
-	 * Every action of the resource. Required when the generics are enums, because
-	 * types are erased at runtime. Defaults to the union of the actions in `statements`.
-	 */
-	actions?: readonly TAction[];
-	/** Role → allowed actions. Becomes `ac.newRole({ [resource]: actions })` for each role. */
-	statements: Partial<Record<TRole, readonly TAction[]>>;
-	/**
-	 * An action that expands to every action of the resource when roles are
-	 * built (e.g. 'manage'). It is an action of the policy too, listed in
-	 * `actions` or not.
-	 */
-	wildcard?: TAction;
-}
-
-/** One ability per action, typed so `@Can(Policy, 'create')` is checked at compile time. */
-export type BetterAuthACAbilities<TAction extends string> = {
-	// Keys are the string values, so enum members work with @Can(Policy, 'create').
-	[A in TAction as `${A}`]: (user: BetterAuthUser | null) => Promise<boolean>;
-};
-
-/** Type-only: `checkPermission` is `protected` so it is not an ability of the policy. */
-declare abstract class BetterAuthACPolicyBase<TAction extends string> {
-	readonly betterAuth: BetterAuthService;
-	protected checkPermission(
-		user: BetterAuthUser | null,
-		action: TAction,
-	): Promise<boolean>;
-}
-
-export type BetterAuthACPolicyClass<TAction extends string> =
-	abstract new () => BetterAuthACPolicyBase<TAction> &
-		BetterAuthACAbilities<TAction>;
-
-export type BetterAuthOrganizationACAbilities<TAction extends string> = {
-	[A in TAction as `${A}`]: (
-		user: BetterAuthUser | null,
-		organizationId: string | null | undefined,
-	) => Promise<boolean>;
-};
-
-/** Type-only: see {@link BetterAuthACPolicyBase}. */
-declare abstract class BetterAuthOrganizationACPolicyBase<
-	TAction extends string,
-> {
-	readonly betterAuth: BetterAuthService;
-	protected checkPermission(
-		user: BetterAuthUser | null,
-		action: TAction,
-		organizationId: string | null | undefined,
-	): Promise<boolean>;
-}
-
-export type BetterAuthOrganizationACPolicyClass<TAction extends string> =
-	abstract new () => BetterAuthOrganizationACPolicyBase<TAction> &
-		BetterAuthOrganizationACAbilities<TAction>;
-
+/** Names an action can't take: an ability by that name would replace them. */
 const RESERVED = new Set([
 	"before",
-	"constructor",
 	"betterAuth",
 	"checkPermission",
+	// constructor, and BetterAuthPolicy's helpers.
+	...Object.getOwnPropertyNames(BetterAuthPolicy.prototype),
 ]);
 
 /**
@@ -127,44 +59,32 @@ function resolveActions<TRole extends string, TAction extends string>(
 
 	for (const action of unique) {
 		if (RESERVED.has(action))
-			throw new Error(
+			throw new BetterAuthConfigurationError(
 				`Action '${action}' of resource '${resource}' is reserved by @nestjs/authorization or the policy and can't be an ability name.`,
 			);
 	}
 	return unique;
 }
 
-/** Shared by the user and the organization scope, which differ in their ability arguments. */
+/**
+ * Shared by the user and the organization scope: the abilities, each calling
+ * `checkPermission()`, which each scope implements with its own arguments.
+ */
 function createPolicyBase<TRole extends string, TAction extends string>(
 	scope: BetterAuthACPolicyMetadata["scope"],
 	resource: string,
 	config: BetterAuthACPolicyConfig<TRole, TAction>,
-	check: (
-		betterAuth: BetterAuthService,
-		user: BetterAuthUser,
-		action: TAction,
-		// biome-ignore lint/suspicious/noExplicitAny: see above
-		...args: any[]
-	) => Promise<boolean>,
-): abstract new () => unknown {
+) {
 	const actions = resolveActions(resource, config);
 
-	abstract class AccessControlPolicy {
-		// Property injection, like SessionCookieProvider's SessionService in
-		// @nestjs/authentication: subclasses declare their own constructor
-		// dependencies without forwarding this one.
-		@Inject(BetterAuthService) readonly betterAuth!: BetterAuthService;
-
-		async checkPermission(
+	abstract class AccessControlPolicy extends BetterAuthPolicy {
+		/** Whether the user's role grants `action` on the resource. Guests are denied, and Nest answers 401 for them. */
+		abstract checkPermission(
 			user: BetterAuthUser | null,
 			action: TAction,
 			// biome-ignore lint/suspicious/noExplicitAny: see above
 			...args: any[]
-		): Promise<boolean> {
-			// Guests are denied, and Nest answers 401 for them.
-			if (!user) return false;
-			return check(this.betterAuth, user, action, ...args);
-		}
+		): Promise<boolean>;
 	}
 
 	for (const action of actions) {
@@ -226,19 +146,14 @@ export function BetterAuthACPolicy<
 	config: BetterAuthACPolicyConfig<TRole, TAction>,
 ): BetterAuthACPolicyClass<TAction> {
 	const name = resourceNameOf(resource);
-	return createPolicyBase(
-		"user",
-		name,
-		config,
-		async (betterAuth, user, action) => {
-			// biome-ignore lint/suspicious/noExplicitAny: the API only exists with the admin plugin
-			const api = betterAuth.api as any;
-			const result = await api.userHasPermission({
-				body: { userId: user.id, permissions: { [name]: [action] } },
-			});
-			return result?.success === true;
-		},
-	) as unknown as BetterAuthACPolicyClass<TAction>;
+
+	abstract class UserACPolicy extends createPolicyBase("user", name, config) {
+		async checkPermission(user: BetterAuthUser | null, action: TAction) {
+			if (!user) return false;
+			return this.userHasPermission(user, { [name]: [action] });
+		}
+	}
+	return UserACPolicy as unknown as BetterAuthACPolicyClass<TAction>;
 }
 
 /**
@@ -255,22 +170,24 @@ export function BetterAuthOrganizationACPolicy<
 	config: BetterAuthACPolicyConfig<TRole, TAction>,
 ): BetterAuthOrganizationACPolicyClass<TAction> {
 	const name = resourceNameOf(resource);
-	return createPolicyBase(
+
+	abstract class OrganizationACPolicy extends createPolicyBase(
 		"organization",
 		name,
 		config,
-		async (
-			betterAuth,
-			user,
-			action,
+	) {
+		async checkPermission(
+			user: BetterAuthUser | null,
+			action: TAction,
 			organizationId: string | null | undefined,
-		) => {
-			if (!organizationId) return false;
-			return memberHasPermission(betterAuth, user.id, organizationId, {
+		) {
+			if (!user || !organizationId) return false;
+			return this.memberHasPermission(user, organizationId, {
 				[name]: [action],
 			});
-		},
-	) as unknown as BetterAuthOrganizationACPolicyClass<TAction>;
+		}
+	}
+	return OrganizationACPolicy as unknown as BetterAuthOrganizationACPolicyClass<TAction>;
 }
 
 /**

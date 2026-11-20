@@ -1,7 +1,36 @@
+import { Inject, Injectable } from "@nestjs/common";
+import { AuthenticationRegistry } from "@nestjs/authentication";
 import request from "supertest";
 import { jwt } from "better-auth/plugins/jwt";
 import { apiKey } from "@better-auth/api-key";
+import {
+	BetterAuthApiKeyProvider,
+	BetterAuthJwtProvider,
+} from "../../src/index.ts";
 import { createTestApp, createTestAuth, signUp } from "../shared/app.ts";
+import { SessionAuth } from "../shared/auth-providers.ts";
+
+/** A JWT provider with its own realm, through super(). */
+@Injectable()
+class PartnersJwtAuth extends BetterAuthJwtProvider {
+	constructor(
+		@Inject(AuthenticationRegistry) registry: AuthenticationRegistry,
+	) {
+		super({ realm: "partners" });
+		registry.registerProvider(this, { order: 1 });
+	}
+}
+
+/** An API key provider reading the plugin's custom header. */
+@Injectable()
+class PartnerApiKeyAuth extends BetterAuthApiKeyProvider {
+	constructor(
+		@Inject(AuthenticationRegistry) registry: AuthenticationRegistry,
+	) {
+		super({ headers: "X-Partner-Key" });
+		registry.registerProvider(this, { order: 2 });
+	}
+}
 
 describe("api key", () => {
 	let setup: Awaited<ReturnType<typeof createTestApp>>;
@@ -178,16 +207,68 @@ describe("jwt", () => {
 			.set("Authorization", `Bearer ${token}`)
 			.expect(200);
 	});
+
+	it("challenges in the 'api' realm by default", async () => {
+		const response = await request(server()).get("/test/protected").expect(401);
+		expect(response.headers["www-authenticate"]).toContain(
+			'Bearer realm="api"',
+		);
+	});
+});
+
+describe("jwt: custom realm", () => {
+	let setup: Awaited<ReturnType<typeof createTestApp>>;
+
+	beforeAll(async () => {
+		setup = await createTestApp({
+			auth: createTestAuth({
+				baseURL: "http://localhost:3000",
+				plugins: [jwt()],
+			}),
+			authProviders: [SessionAuth, PartnersJwtAuth],
+		});
+	});
+
+	afterAll(async () => {
+		await setup.app.close();
+	});
+
+	it("challenges in the realm passed to super(), without credentials and for a bad JWT", async () => {
+		const missing = await request(setup.app.getHttpServer())
+			.get("/test/protected")
+			.expect(401);
+		expect(missing.headers["www-authenticate"]).toContain(
+			'Bearer realm="partners"',
+		);
+		expect(missing.headers["www-authenticate"]).not.toContain(
+			'Bearer realm="api"',
+		);
+
+		const { token } = await signUp(setup.auth);
+		const { token: jwtToken } =
+			await // biome-ignore lint/suspicious/noExplicitAny: the jwt endpoints are not typed on the generic auth instance
+			(setup.auth.api as any).getToken({
+				headers: new Headers({ Authorization: `Bearer ${token}` }),
+			});
+		const [header, payload] = jwtToken.split(".");
+		const invalid = await request(setup.app.getHttpServer())
+			.get("/test/protected")
+			.set("Authorization", `Bearer ${header}.${payload}.invalid-signature`)
+			.expect(401);
+		expect(invalid.headers["www-authenticate"]).toBe(
+			'Bearer realm="partners", error="invalid_token", error_description="invalid token"',
+		);
+	});
 });
 
 describe("api key: custom headers", () => {
-	it("reads keys from providers.apiKey.headers, matching apiKey({ apiKeyHeaders })", async () => {
+	it("reads keys from the headers passed to super(), matching apiKey({ apiKeyHeaders })", async () => {
 		const auth = createTestAuth({
 			plugins: [apiKey({ apiKeyHeaders: ["x-partner-key"] })],
 		});
 		const { app } = await createTestApp({
 			auth,
-			module: { providers: { apiKey: { headers: "X-Partner-Key" } } },
+			authProviders: [SessionAuth, PartnerApiKeyAuth],
 		});
 
 		try {

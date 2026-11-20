@@ -7,7 +7,14 @@
 	},
 	"files": {
 		"ignoreUnknown": false,
-		"includes": ["**", "!**/dist", "!**/.vitest-cjs", "!examples", "!README.md"]
+		"includes": [
+			"**",
+			"!**/dist",
+			"!**/.vitest-cjs",
+			"!**/README.md",
+			"!example/drizzle",
+			"!example/src/database/schema/auth-schema.ts"
+		]
 	},
 	"formatter": {
 		"enabled": true,

@@ -1,15 +1,21 @@
-import { Inject, Logger, Module } from "@nestjs/common";
+import { Logger } from "@nestjs/common";
 import { Policy } from "@nestjs/authorization";
-import { BetterAuthService } from "../better-auth.service.ts";
-import type { BetterAuthUser } from "../types.ts";
-import {
-	findMember,
-	matchesRequiredRole,
-	memberHasPermission,
-} from "./organization.ts";
+import type { BetterAuthUser } from "../interfaces/better-auth-session.interface.ts";
+import { BetterAuthPolicy } from "./better-auth.policy.ts";
+import type { PermissionCheck } from "./interfaces/permission-check.interface.ts";
 
-/** Resource → actions, as Better Auth's access control checks them. */
-export type PermissionCheck = Record<string, string[]>;
+/**
+ * Whether a role value (a string, a comma-separated string or an array)
+ * matches any of the required roles.
+ */
+function matchesRequiredRole(
+	role: string | string[] | undefined | null,
+	requiredRoles: readonly string[],
+): boolean {
+	if (!role) return false;
+	const roles = Array.isArray(role) ? role : role.split(",");
+	return roles.some((r) => requiredRoles.includes(r.trim()));
+}
 
 /**
  * Better Auth's role and permission checks as `@nestjs/authorization`
@@ -26,15 +32,11 @@ export type PermissionCheck = Record<string, string[]>;
  * ])
  * ```
  *
- * Provided by {@link BetterAuthAuthorizationModule}.
+ * Provided by `BetterAuthAuthorizationModule`.
  */
 @Policy()
-export class BetterAuthPermissionPolicy {
+export class BetterAuthPermissionPolicy extends BetterAuthPolicy {
 	private readonly logger = new Logger(BetterAuthPermissionPolicy.name);
-
-	constructor(
-		@Inject(BetterAuthService) private readonly betterAuth: BetterAuthService,
-	) {}
 
 	/** `user.role` (`admin()` plugin) is one of `roles`. */
 	hasRole(user: BetterAuthUser | null, roles: readonly string[]): boolean {
@@ -56,7 +58,7 @@ export class BetterAuthPermissionPolicy {
 		roles: readonly string[],
 	): Promise<boolean> {
 		if (!user || !organizationId) return false;
-		const member = await findMember(this.betterAuth, user.id, organizationId);
+		const member = await this.findMember(user.id, organizationId);
 		return matchesRequiredRole(member?.role, roles);
 	}
 
@@ -64,19 +66,14 @@ export class BetterAuthPermissionPolicy {
 	 * The user's role grants `permissions`, through the `admin()` plugin's
 	 * access control. `role` checks a role instead of the user's.
 	 */
-	async userHasPermission(
+	override async userHasPermission(
 		user: BetterAuthUser | null,
 		permissions: PermissionCheck,
 		role?: string,
 	): Promise<boolean> {
 		if (!user) return false;
 		try {
-			// biome-ignore lint/suspicious/noExplicitAny: the API only exists with the admin plugin
-			const api = this.betterAuth.api as any;
-			const result = await api.userHasPermission({
-				body: role ? { role, permissions } : { userId: user.id, permissions },
-			});
-			return result?.success === true;
+			return await super.userHasPermission(user, permissions, role);
 		} catch (error) {
 			this.logger.error("userHasPermission failed", error);
 			return false;
@@ -84,29 +81,17 @@ export class BetterAuthPermissionPolicy {
 	}
 
 	/** The user's member role grants `permissions` in the organization. */
-	async memberHasPermission(
+	override async memberHasPermission(
 		user: BetterAuthUser | null,
 		organizationId: string | null | undefined,
 		permissions: PermissionCheck,
 	): Promise<boolean> {
 		if (!user || !organizationId) return false;
 		try {
-			return await memberHasPermission(
-				this.betterAuth,
-				user.id,
-				organizationId,
-				permissions,
-			);
+			return await super.memberHasPermission(user, organizationId, permissions);
 		} catch (error) {
 			this.logger.error("memberHasPermission failed", error);
 			return false;
 		}
 	}
 }
-
-/** Provides {@link BetterAuthPermissionPolicy}. */
-@Module({
-	providers: [BetterAuthPermissionPolicy],
-	exports: [BetterAuthPermissionPolicy],
-})
-export class BetterAuthAuthorizationModule {}

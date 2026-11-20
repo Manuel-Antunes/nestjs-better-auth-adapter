@@ -1,37 +1,21 @@
-import type { HttpAdapterHost } from "@nestjs/core";
 import { createRequire } from "node:module";
-import {
-	BYTE_UNITS,
-	type BodyParserByteUnit,
-	type BodyParserLimit,
-	type BodyParserTypeMatcher,
-} from "./body-parser-options.ts";
+import { BetterAuthConfigurationError } from "../errors/better-auth-configuration.error.ts";
 import type {
+	BodyParserByteUnit,
+	BodyParserLimit,
+	BodyParserTypeMatcher,
 	ResolvedBodyParserOptions,
 	ResolvedJsonBodyParserOptions,
 	ResolvedUrlencodedBodyParserOptions,
-} from "./middlewares.ts";
-
-type FastifyBodyParserDone = (err: Error | null, body?: unknown) => void;
-type FastifyBodyParserHandler = (
-	body: Buffer,
-	done: FastifyBodyParserDone,
-) => void;
-/** `FastifyAdapter.useBodyParser()`, typed without importing `@nestjs/platform-fastify`. */
-type FastifyUseBodyParser = (
-	type: string | string[] | RegExp,
-	rawBody: boolean,
-	options?: { bodyLimit?: number },
-	parser?: (
-		request: unknown,
-		body: Buffer,
-		done: FastifyBodyParserDone,
-	) => void,
-) => void;
-type FastifyHttpAdapter = HttpAdapterHost["httpAdapter"] & {
-	useBodyParser?: FastifyUseBodyParser;
-};
-type QsModule = typeof import("qs");
+} from "../interfaces/body-parser-options.interface.ts";
+import type {
+	FastifyBodyParserDone,
+	FastifyBodyParserHandler,
+	FastifyHttpAdapter,
+	FastifyUseBodyParser,
+	QsModule,
+} from "../interfaces/http.interface.ts";
+import { BYTE_UNITS } from "./byte-units.ts";
 
 const require = createRequire(import.meta.url);
 
@@ -46,7 +30,7 @@ function resolveFastifyParserType(
 	}
 
 	if (typeof type === "function") {
-		throw new Error(
+		throw new BetterAuthConfigurationError(
 			"Function-based bodyParser type matchers are not supported with the Fastify adapter.",
 		);
 	}
@@ -71,7 +55,7 @@ function resolveFastifyBodyLimit(limit: BodyParserLimit | undefined) {
 	const match = SIZE_REGEX.exec(limit.trim().toLowerCase());
 
 	if (!match) {
-		throw new Error(
+		throw new BetterAuthConfigurationError(
 			`Unsupported Fastify body parser limit '${limit}'. Use a number of bytes or a string like '2mb', '0.5gb', etc.`,
 		);
 	}
@@ -81,7 +65,7 @@ function resolveFastifyBodyLimit(limit: BodyParserLimit | undefined) {
 	const bytes = Math.floor(value * BYTE_UNITS[unit]);
 
 	if (!Number.isSafeInteger(bytes)) {
-		throw new RangeError(
+		throw new BetterAuthConfigurationError(
 			`Resolved body limit exceeds safe integer range. Received: '${limit}'`,
 		);
 	}
@@ -180,7 +164,7 @@ function getQsParse(): QsModule["parse"] {
 	}
 
 	if (!cachedQsParse) {
-		throw new Error(
+		throw new BetterAuthConfigurationError(
 			"Fastify bodyParser.urlencoded with extended: true requires the optional peer dependency 'qs'. Install 'qs' in your application to enable nested URL-encoded parsing.",
 		);
 	}

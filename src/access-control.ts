@@ -1,6 +1,10 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { DiscoveryService } from "@nestjs/core";
-import { createAccessControl } from "better-auth/plugins/access";
+import {
+	type AccessControl,
+	type Role,
+	createAccessControl,
+} from "better-auth/plugins/access";
 import {
 	adminAc,
 	defaultStatements as adminDefaultStatements,
@@ -13,41 +17,21 @@ import {
 	ownerAc,
 } from "better-auth/plugins/organization/access";
 import { BETTER_AUTH_AC_POLICY } from "./constants.ts";
+import { BetterAuthConfigurationError } from "./errors/better-auth-configuration.error.ts";
+import type {
+	AccessControlDefaults,
+	AccessControlScope,
+	BetterAuthACPolicyMetadata,
+	BetterAuthAccessControlOptions,
+	BuildAccessControlOptions,
+} from "./interfaces/access-control.interface.ts";
 
-type StatementsMap = Record<string, readonly string[]>;
-
-export type AccessControlScope = "user" | "organization";
-
-/** What `BetterAuthACPolicy()` / `BetterAuthOrganizationACPolicy()` attach to a class. */
-export interface BetterAuthACPolicyMetadata {
-	scope: AccessControlScope;
-	resource: string;
-	actions: readonly string[];
-	statements: Record<string, readonly string[] | undefined>;
-	wildcard?: string;
-}
-
-export interface BuildAccessControlOptions {
-	/**
-	 * Keep Better Auth's own statements and roles (`user`, `session`, `member`,
-	 * `invitation`…) so its built-in endpoints keep working. Better Auth's docs
-	 * warn that custom roles otherwise override the defaults.
-	 * @default true
-	 */
-	defaults?: boolean;
-}
-
-type Defaults = {
-	statements: StatementsMap;
-	roles: Record<string, StatementsMap>;
-};
-
-const ADMIN_DEFAULTS: Defaults = {
+const ADMIN_DEFAULTS: AccessControlDefaults = {
 	statements: adminDefaultStatements,
 	roles: { admin: adminAc.statements, user: userAc.statements },
 };
 
-const ORGANIZATION_DEFAULTS: Defaults = {
+const ORGANIZATION_DEFAULTS: AccessControlDefaults = {
 	statements: orgDefaultStatements,
 	roles: {
 		owner: ownerAc.statements,
@@ -72,7 +56,9 @@ export class BetterAuthAccessControl {
 	) {}
 
 	/** Spread into `admin({...})`. */
-	admin(options: BuildAccessControlOptions = {}) {
+	admin(
+		options: BuildAccessControlOptions = {},
+	): BetterAuthAccessControlOptions {
 		return this.build(
 			"user",
 			options.defaults === false ? undefined : ADMIN_DEFAULTS,
@@ -80,7 +66,9 @@ export class BetterAuthAccessControl {
 	}
 
 	/** Spread into `organization({...})`. */
-	organization(options: BuildAccessControlOptions = {}) {
+	organization(
+		options: BuildAccessControlOptions = {},
+	): BetterAuthAccessControlOptions {
 		return this.build(
 			"organization",
 			options.defaults === false ? undefined : ORGANIZATION_DEFAULTS,
@@ -88,7 +76,10 @@ export class BetterAuthAccessControl {
 	}
 
 	/** Collects the discovered policies of `scope` on top of Better Auth's defaults, and builds the `ac` and `roles` from them. */
-	private build(scope: AccessControlScope, base?: Defaults) {
+	private build(
+		scope: AccessControlScope,
+		base?: AccessControlDefaults,
+	): BetterAuthAccessControlOptions {
 		const statements: Record<string, string[]> = {};
 		for (const [resource, actions] of Object.entries(base?.statements ?? {})) {
 			statements[resource] = [...actions];
@@ -113,7 +104,7 @@ export class BetterAuthAccessControl {
 
 			const owner = seen.get(definition.resource);
 			if (owner && owner.metatype !== metatype) {
-				throw new Error(
+				throw new BetterAuthConfigurationError(
 					`Two ${scope} policies define resource '${definition.resource}': ${owner.name} and ${metatype.name}.`,
 				);
 			}
@@ -138,6 +129,6 @@ export class BetterAuthAccessControl {
 				ac.newRole(roleStatements),
 			]),
 		);
-		return { ac, roles };
+		return { ac: ac as AccessControl, roles: roles as Record<string, Role> };
 	}
 }

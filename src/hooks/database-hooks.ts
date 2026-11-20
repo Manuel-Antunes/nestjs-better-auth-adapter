@@ -1,13 +1,10 @@
-import type { NestBridge } from "../plugin/bridge.ts";
 import type {
+	DatabaseHookData as Data,
+	DatabaseHookFn,
 	DatabaseHookModel,
 	DatabaseHookOperation,
-} from "./hook.decorators.ts";
-
-// biome-ignore lint/suspicious/noExplicitAny: Better Auth's records vary by model and plugins
-type Data = Record<string, any>;
-// biome-ignore lint/suspicious/noExplicitAny: Better Auth decides what a database hook may return
-type DatabaseHookFn = (data: Data, context: any) => any;
+} from "../interfaces/hooks.interface.ts";
+import type { NestBridge } from "../plugin/interfaces/bridge.interface.ts";
 
 /**
  * Adds a database hook to the `nestjs()` plugin's `databaseHooks`, after the

@@ -40,6 +40,8 @@ describe("websocket auth e2e", () => {
 	});
 
 	afterAll(async () => {
+		// Bun's http server waits for the sockets socket.io leaves open.
+		app.getHttpServer().closeAllConnections?.();
 		await app.close();
 	});
 

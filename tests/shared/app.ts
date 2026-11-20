@@ -3,10 +3,12 @@ import {
 	Controller,
 	Get,
 	Module,
+	Post,
 	type DynamicModule,
 	type INestApplication,
 	type Provider,
 	type Type,
+	type WebSocketAdapter,
 } from "@nestjs/common";
 import { Test } from "@nestjs/testing";
 import { ApolloDriver, type ApolloDriverConfig } from "@nestjs/apollo";
@@ -32,6 +34,7 @@ import {
 	BetterAuthSessionProvider,
 } from "../../src/index.ts";
 import { nestjs } from "../../src/plugin/index.ts";
+import { defaultAuthProviders } from "./auth-providers.ts";
 import { createTestHttpAdapter, initTestApplication } from "./http-adapter.ts";
 
 export type BetterAuthOptions = Parameters<typeof betterAuth>[0];
@@ -116,6 +119,11 @@ export class TestController {
 		return { id };
 	}
 
+	@Post("write")
+	write(@CurrentUser("id") id: string) {
+		return { id };
+	}
+
 	@Get("context")
 	contextUser() {
 		return { id: this.context.requireUser().id };
@@ -172,6 +180,11 @@ export interface TestAppOptions {
 	betterAuthModule?: DynamicModule;
 	controllers?: Type<unknown>[];
 	providers?: Provider[];
+	/**
+	 * The credential providers the app registers.
+	 * @default `defaultAuthProviders(auth)`: session, and JWT and API key with their plugins
+	 */
+	authProviders?: Provider[];
 	imports?: (DynamicModule | Type<unknown>)[];
 	authentication?: AuthenticationModuleOptions;
 	/** Import `AuthorizationModule` (deny-by-default). */
@@ -180,6 +193,8 @@ export interface TestAppOptions {
 	globalPrefix?: string;
 	/** Listen on a random port, for clients other than supertest (socket.io). */
 	listen?: boolean;
+	/** The WebSocket adapter, e.g. `(app) => new WsAdapter(app)`; socket.io's by default. */
+	webSocketAdapter?: (app: INestApplication) => WebSocketAdapter;
 }
 
 /** An app with `AuthenticationModule` and `BetterAuthModule`, initialized on the adapter under test. */
@@ -208,7 +223,10 @@ export async function createTestApp(options: TestAppOptions) {
 			...(options.imports ?? []),
 		],
 		controllers: options.controllers ?? [TestController],
-		providers: options.providers ?? [],
+		providers: [
+			...(options.authProviders ?? defaultAuthProviders(auth)),
+			...(options.providers ?? []),
+		],
 	})
 	class AppModule {}
 
@@ -222,6 +240,8 @@ export async function createTestApp(options: TestAppOptions) {
 		{ bodyParser: false, logger: false },
 	);
 	if (options.globalPrefix) app.setGlobalPrefix(options.globalPrefix);
+	if (options.webSocketAdapter)
+		app.useWebSocketAdapter(options.webSocketAdapter(app));
 
 	if (options.listen) await app.listen(0);
 	else await initTestApplication(app);

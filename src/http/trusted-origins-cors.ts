@@ -1,24 +1,10 @@
-import type { IncomingMessage, ServerResponse } from "node:http";
+import type {
+	HttpRequestLike as RequestLike,
+	HttpResponseLike as ResponseLike,
+	NodeResponseLike,
+	TrustedOriginsCorsOptions,
+} from "../interfaces/http.interface.ts";
 import { getNodeRequest, getNodeResponse } from "./middlewares.ts";
-
-type RequestLike = IncomingMessage & {
-	raw?: IncomingMessage;
-	headers: IncomingMessage["headers"];
-	method?: string;
-};
-
-type ResponseLike = ServerResponse<IncomingMessage> & {
-	raw?: ServerResponse<IncomingMessage>;
-};
-
-type NodeResponseLike = ServerResponse<IncomingMessage> & {
-	getHeader(name: string): number | string | string[] | undefined;
-	setHeader(
-		name: string,
-		value: number | string | readonly string[],
-	): ServerResponse<IncomingMessage>;
-	statusCode: number;
-};
 
 function getHeaderValue(header: string | string[] | undefined) {
 	if (Array.isArray(header)) {
@@ -48,39 +34,22 @@ function appendVaryHeader(res: NodeResponseLike, value: string) {
 	res.setHeader("Vary", Array.from(varyValues).join(", "));
 }
 
-function escapeRegex(pattern: string) {
-	return pattern.replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
-}
-
-function matchesOriginPattern(origin: string, pattern: string) {
-	if (pattern === "*") return true;
-
-	const regex = new RegExp(
-		`^${pattern.split("*").map(escapeRegex).join(".*")}$`,
-	);
-	return regex.test(origin);
-}
-
-function isAllowedOrigin(origin: string, trustedOrigins: string[]) {
-	return trustedOrigins.some((trustedOrigin) =>
-		matchesOriginPattern(origin, trustedOrigin),
-	);
-}
-
-export interface FastifyTrustedOriginsCorsOptions {
-	trustedOrigins: string[];
-}
-
-export function handleFastifyTrustedOriginsCors(
+/**
+ * CORS for Better Auth's routes, on either adapter: the origins Better Auth
+ * trusts, with credentials. Answers preflights itself (`true`); other
+ * requests get their headers and go on (`false`). Origins it doesn't trust
+ * get no CORS headers, and Better Auth's own origin check still applies.
+ */
+export function handleTrustedOriginsCors(
 	req: RequestLike,
 	res: ResponseLike,
-	options: FastifyTrustedOriginsCorsOptions,
+	{ isTrustedOrigin }: TrustedOriginsCorsOptions,
 ) {
 	const nodeReq = getNodeRequest(req) as RequestLike;
 	const nodeRes = getNodeResponse(res) as NodeResponseLike;
 	const origin = getHeaderValue(nodeReq.headers.origin);
 
-	if (!origin || !isAllowedOrigin(origin, options.trustedOrigins)) {
+	if (!origin || !isTrustedOrigin(origin)) {
 		return false;
 	}
 
@@ -114,4 +83,26 @@ export function handleFastifyTrustedOriginsCors(
 	nodeRes.end();
 
 	return true;
+}
+
+/**
+ * Better Auth's `isTrustedOrigin()`, its own `trustedOrigins` matching
+ * (wildcards, IP ranges, `BETTER_AUTH_TRUSTED_ORIGINS`), remembered per
+ * origin: a request carries one, and the patterns don't change. Bounded, as
+ * origins come from clients.
+ */
+export function cachedOriginCheck(
+	isTrustedOrigin: (origin: string) => boolean,
+	limit = 1000,
+): (origin: string) => boolean {
+	const answers = new Map<string, boolean>();
+	return (origin) => {
+		let trusted = answers.get(origin);
+		if (trusted === undefined) {
+			trusted = isTrustedOrigin(origin);
+			if (answers.size >= limit) answers.clear();
+			answers.set(origin, trusted);
+		}
+		return trusted;
+	};
 }

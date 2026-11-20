@@ -4,6 +4,7 @@ import {
 	createTestApp,
 	createTestAuth,
 	signUp,
+	TestResolver,
 	uniqueEmail,
 	type TestAuth,
 } from "../shared/app.ts";
@@ -91,6 +92,26 @@ describe("rest auth e2e", () => {
 
 		const response = await agent.get("/test/protected").expect(200);
 		expect(response.body.user.name).toBe("Cookie User");
+	});
+
+	it("parses the bodies of routes outside the global prefix, like GraphQL's", async () => {
+		const prefixed = await createTestApp({
+			auth: createTestAuth(),
+			controllers: [],
+			providers: [TestResolver],
+			graphql: true,
+			globalPrefix: "v1",
+		});
+		try {
+			const response = await request(prefixed.app.getHttpServer())
+				.post("/graphql")
+				.set("Content-Type", "application/json")
+				.send({ query: "{ publicHello }" })
+				.expect(200);
+			expect(response.body).toEqual({ data: { publicHello: "ok" } });
+		} finally {
+			await prefixed.app.close();
+		}
 	});
 
 	it("should authenticate with a global prefix", async () => {

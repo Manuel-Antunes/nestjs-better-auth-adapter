@@ -1,33 +1,18 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createRequire } from "node:module";
-import type { BetterAuthModuleOptions } from "../better-auth.module-definition.ts";
+import type { BetterAuthModuleOptions } from "../interfaces/better-auth-module-options.interface.ts";
 import type {
-	JsonBodyParserOptions,
-	UrlencodedBodyParserOptions,
-} from "./body-parser-options.ts";
+	ResolvedBodyParserOptions,
+	SkipBodyParsingMiddlewareOptions,
+} from "../interfaces/body-parser-options.interface.ts";
+import type {
+	ExpressBodyParserModule,
+	HttpRequestLike as RequestLike,
+	HttpResponseLike as ResponseLike,
+	MiddlewareNext,
+} from "../interfaces/http.interface.ts";
 
 const require = createRequire(import.meta.url);
-
-type MiddlewareNext = (error?: unknown) => void;
-type BodyParserHandler = (
-	req: IncomingMessage,
-	res: ServerResponse<IncomingMessage>,
-	next: MiddlewareNext,
-) => void;
-
-type ExpressBodyParserModule = {
-	json(options?: unknown): BodyParserHandler;
-	urlencoded(options?: unknown): BodyParserHandler;
-};
-
-export interface SkipBodyParsingMiddlewareOptions {
-	/**
-	 * The base path for Better Auth routes. Body parsing will be skipped for these routes.
-	 * @default "/api/auth"
-	 */
-	basePath?: string;
-	bodyParser?: ResolvedBodyParserOptions;
-}
 
 /**
  * Raw body parser verify callback.
@@ -45,35 +30,9 @@ const rawBodyParser = (
 	return true;
 };
 
-type RequestLike = IncomingMessage & {
-	raw?: IncomingMessage;
-	originalUrl?: string;
-	url?: string;
-	baseUrl?: string;
-};
-
-type ResponseLike = ServerResponse<IncomingMessage> & {
-	raw?: ServerResponse<IncomingMessage>;
-};
-
 function getExpressBodyParser(): ExpressBodyParserModule {
 	return require("express") as ExpressBodyParserModule;
 }
-
-export type ResolvedJsonBodyParserOptions = JsonBodyParserOptions & {
-	enabled: boolean;
-	rawBody: boolean;
-};
-
-export type ResolvedUrlencodedBodyParserOptions =
-	UrlencodedBodyParserOptions & {
-		enabled: boolean;
-	};
-
-export type ResolvedBodyParserOptions = {
-	json: ResolvedJsonBodyParserOptions;
-	urlencoded: ResolvedUrlencodedBodyParserOptions;
-};
 
 export function resolveBodyParserOptions(
 	options: Pick<BetterAuthModuleOptions, "bodyParser"> = {},
@@ -117,7 +76,7 @@ export function getNodeResponse(res: ResponseLike) {
 }
 
 export function matchesBasePath(req: RequestLike, basePath: string) {
-	const requestPath = getRequestPath(req);
+	const requestPath = getRequestPath(req).split("?", 1)[0] ?? "";
 
 	return requestPath === basePath || requestPath.startsWith(`${basePath}/`);
 }

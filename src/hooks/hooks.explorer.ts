@@ -1,10 +1,8 @@
 import { Inject, Injectable, type OnModuleInit } from "@nestjs/common";
 import { DiscoveryService, MetadataScanner } from "@nestjs/core";
 import { createAuthMiddleware } from "better-auth/api";
-import {
-	BETTER_AUTH_MODULE_OPTIONS,
-	type BetterAuthModuleOptions,
-} from "../better-auth.module-definition.ts";
+import { BETTER_AUTH_MODULE_OPTIONS } from "../better-auth.module-definition.ts";
+import type { BetterAuthModuleOptions } from "../interfaces/better-auth-module-options.interface.ts";
 import {
 	AFTER_DATABASE_HOOK_KEY,
 	AFTER_HOOK_KEY,
@@ -15,13 +13,12 @@ import {
 } from "../constants.ts";
 import { bridgeOf } from "../plugins.ts";
 import { NEST_OWNED } from "../plugin/bridge.ts";
-import { addDatabaseHook } from "./database-hooks.ts";
 import type {
 	DatabaseHookModel,
 	DatabaseHookOperation,
-} from "./hook.decorators.ts";
-
-type Method = (...args: unknown[]) => unknown;
+	HookMethod as Method,
+} from "../interfaces/hooks.interface.ts";
+import { addDatabaseHook } from "./database-hooks.ts";
 
 /**
  * Finds the `@Hook()` and `@DatabaseHook()` providers once Nest has created

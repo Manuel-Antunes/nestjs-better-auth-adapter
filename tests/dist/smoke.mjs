@@ -8,9 +8,10 @@ import "reflect-metadata";
 import assert from "node:assert/strict";
 import {
 	AuthenticationModule,
+	AuthenticationRegistry,
 	CurrentUser,
 } from "@nestjs/authentication";
-import { Controller, Get, Module } from "@nestjs/common";
+import { Controller, Get, Inject, Injectable, Module } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
 import { betterAuth } from "better-auth";
 import { admin } from "better-auth/plugins/admin";
@@ -19,12 +20,15 @@ import {
 	BetterAuthAccessControl,
 	BetterAuthModule,
 	BetterAuthService,
+	BetterAuthSessionProvider,
 } from "../../dist/index.mjs";
 import {
 	BetterAuthAuthorizationModule,
 	BetterAuthPermissionPolicy,
 } from "../../dist/authorization/index.mjs";
 import { nestPasswordHasher, nestjs } from "../../dist/plugin/index.mjs";
+import * as core from "../../dist/index.mjs";
+import * as oauthProvider from "../../dist/oauth-provider/index.mjs";
 
 class MeController {
 	me(user) {
@@ -38,6 +42,16 @@ Get("me")(
 	"me",
 	Object.getOwnPropertyDescriptor(MeController.prototype, "me"),
 );
+
+/** The app's session provider: its `BetterAuthService` is property-injected. */
+class SessionAuth extends BetterAuthSessionProvider {
+	constructor(registry) {
+		super();
+		registry.registerProvider(this, { order: 0 });
+	}
+}
+Injectable()(SessionAuth);
+Inject(AuthenticationRegistry)(SessionAuth, undefined, 0);
 
 let auth;
 class AppModule {}
@@ -58,6 +72,7 @@ Module({
 		BetterAuthAuthorizationModule,
 	],
 	controllers: [MeController],
+	providers: [SessionAuth],
 })(AppModule);
 
 const warnings = [];
@@ -82,6 +97,17 @@ try {
 	assert.equal(signedIn.status, 200);
 	assert.deepEqual(await signedIn.json(), { id: user.id });
 	assert.equal((await fetch(url)).status, 401);
+
+	// The resource server is its own entrypoint, not part of the core.
+	for (const name of [
+		"BetterAuthOAuthProvider",
+		"BetterAuthOAuthProviderModule",
+		"OAuthScopes",
+		"OAuthAccessTokenError",
+	]) {
+		assert.equal(typeof oauthProvider[name], "function", name);
+		assert.equal(name in core, false, `${name} is in the core entrypoint`);
+	}
 
 	console.log("dist smoke test passed");
 } finally {

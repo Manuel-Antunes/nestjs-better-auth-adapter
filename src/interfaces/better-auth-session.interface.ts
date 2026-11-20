@@ -8,6 +8,10 @@ type ResolvedSession = NonNullable<
 export type BetterAuthUser = ResolvedSession["user"] & {
 	/** Set by the `admin()` plugin. */
 	role?: string | string[] | null;
+	/** Set by the `admin()` plugin: the user is banned, until `banExpires` if set. */
+	banned?: boolean | null;
+	/** Set by the `admin()` plugin. */
+	banExpires?: Date | string | null;
 	/** Set by the `twoFactor()` plugin. */
 	twoFactorEnabled?: boolean | null;
 };

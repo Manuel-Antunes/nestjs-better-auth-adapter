@@ -73,11 +73,9 @@ describe("cors e2e", () => {
 			expect(optionsResponse.headers["access-control-allow-credentials"]).toBe(
 				"true",
 			);
-			if (isFastify) {
-				expect(optionsResponse.headers["access-control-allow-headers"]).toBe(
-					"content-type, stripe-signature",
-				);
-			}
+			expect(optionsResponse.headers["access-control-allow-headers"]).toBe(
+				"content-type, stripe-signature",
+			);
 
 			const okResponse = await request(server)
 				.get("/api/auth/ok")
@@ -90,6 +88,49 @@ describe("cors e2e", () => {
 			expect(okResponse.headers["access-control-allow-credentials"]).toBe(
 				"true",
 			);
+		} finally {
+			await app.close();
+		}
+	});
+
+	it("should match origins as Better Auth does: wildcards, and IP ranges that admit IPs only", async () => {
+		const { app } = await createTestApp({
+			auth: createTestAuth({
+				trustedOrigins: ["https://*.example.com", "http://192.168.*.*"],
+			}),
+		});
+
+		try {
+			const origin = async (value: string) =>
+				(
+					await request(app.getHttpServer())
+						.get("/api/auth/ok")
+						.set("Origin", value)
+						.expect(200)
+				).headers["access-control-allow-origin"];
+
+			expect(await origin("https://app.example.com")).toBe(
+				"https://app.example.com",
+			);
+			expect(await origin("http://192.168.0.10")).toBe("http://192.168.0.10");
+			expect(await origin("http://192.168.attacker.com")).toBeUndefined();
+			expect(await origin("https://example.com.attacker.com")).toBeUndefined();
+		} finally {
+			await app.close();
+		}
+	});
+
+	it("should leave CORS for the app's own routes to the app", async () => {
+		const { app } = await createTestApp({
+			auth: createTestAuth({ trustedOrigins: [TRUSTED_ORIGIN] }),
+		});
+
+		try {
+			const response = await request(app.getHttpServer())
+				.get("/test/public")
+				.set("Origin", TRUSTED_ORIGIN)
+				.expect(200);
+			expect(response.headers["access-control-allow-origin"]).toBeUndefined();
 		} finally {
 			await app.close();
 		}

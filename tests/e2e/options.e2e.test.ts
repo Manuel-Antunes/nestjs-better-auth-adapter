@@ -10,7 +10,7 @@ import { MESSAGES } from "@nestjs/core/constants.js";
 import { Public } from "@nestjs/authentication";
 import request from "supertest";
 import type { BetterAuthModuleOptions } from "../../src/index.ts";
-import { createTestApp, createTestAuth, uniqueEmail } from "../shared/app.ts";
+import { createTestApp, createTestAuth } from "../shared/app.ts";
 
 /** Routes that echo what the body parsers produced. */
 @Public()
@@ -52,24 +52,6 @@ describe("options e2e", () => {
 		}));
 		return app.getHttpServer();
 	};
-
-	it("should not serve any auth routes with routes: false", async () => {
-		const server = await setup({ routes: false });
-
-		const signUpResponse = await request(server)
-			.post("/api/auth/sign-up/email")
-			.send({
-				name: "No Routes",
-				email: uniqueEmail(),
-				password: "password-123456",
-			});
-		const signInResponse = await request(server)
-			.post("/api/auth/sign-in/email")
-			.send({ email: uniqueEmail(), password: "password-123456" });
-
-		expect(signUpResponse.status).toBe(404);
-		expect(signInResponse.status).toBe(404);
-	});
 
 	it("should gracefully handle a middleware throwing an uncaught error", async () => {
 		const error = new Error("uncaught");

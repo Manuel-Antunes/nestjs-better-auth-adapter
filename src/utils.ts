@@ -1,3 +1,4 @@
+import type { IncomingHttpHeaders } from "node:http";
 import type { ExecutionContext } from "@nestjs/common";
 import type { GqlExecutionContext as GqlExecutionContextType } from "@nestjs/graphql";
 
@@ -28,4 +29,58 @@ export async function getRequestFromContext(context: ExecutionContext) {
 	}
 
 	return context.switchToHttp().getRequest();
+}
+
+/**
+ * The request behind a call, as far as authentication needs it, as
+ * `@nestjs/authentication` reads it: the HTTP request, GraphQL's
+ * `context.req`, or a WebSocket's handshake (socket.io's `handshake`, or
+ * the upgrade request `WsAuthenticator` keeps on a `ws` client as
+ * `client.request`). `undefined` over RPC.
+ */
+export async function getAuthRequest(context: ExecutionContext): Promise<
+	| {
+			headers: IncomingHttpHeaders;
+			method?: string;
+			url?: string;
+	  }
+	| undefined
+> {
+	const contextType = context.getType<"graphql" | "ws" | "http">();
+	if (contextType === "ws") {
+		const client = context.switchToWs().getClient();
+		if (client?.handshake?.headers)
+			return { headers: client.handshake.headers, url: client.handshake.url };
+		const upgrade = client?.request;
+		return upgrade?.headers
+			? { headers: upgrade.headers, method: upgrade.method, url: upgrade.url }
+			: undefined;
+	}
+	if (contextType !== "http" && contextType !== "graphql") return undefined;
+	const request = await getRequestFromContext(context);
+	return request?.headers ? request : undefined;
+}
+
+/**
+ * The HTTP response of an HTTP or GraphQL execution context (GraphQL's
+ * `context.res`, `context.reply`, or Express's `req.res`), else `undefined`:
+ * WebSockets and RPC have none. Wrapped, since Fastify's reply is a
+ * thenable: a promise of it would wait for the response to be sent.
+ */
+export async function getResponseFromContext(
+	context: ExecutionContext,
+	// biome-ignore lint/suspicious/noExplicitAny: the response type depends on the HTTP adapter
+): Promise<{ response: any }> {
+	const contextType = context.getType<"graphql" | "ws" | "http">();
+	if (contextType === "http")
+		return { response: context.switchToHttp().getResponse() };
+	if (contextType === "graphql") {
+		const gqlContext = (await getGqlExecutionContext())
+			.create(context)
+			.getContext();
+		return {
+			response: gqlContext.res ?? gqlContext.reply ?? gqlContext.req?.res,
+		};
+	}
+	return { response: undefined };
 }

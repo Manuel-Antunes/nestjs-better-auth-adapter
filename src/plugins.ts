@@ -1,7 +1,8 @@
-import type { Auth } from "./better-auth.module-definition.ts";
-import { NEST_BRIDGE, type NestBridge } from "./plugin/bridge.ts";
-
-type PluginLike = { id: string; options?: Record<string, unknown> };
+import { BetterAuthConfigurationError } from "./errors/better-auth-configuration.error.ts";
+import type { Auth } from "./interfaces/better-auth-module-options.interface.ts";
+import type { PluginLike } from "./interfaces/better-auth-plugin.interface.ts";
+import { NEST_BRIDGE } from "./plugin/bridge.ts";
+import type { NestBridge } from "./plugin/interfaces/bridge.interface.ts";
 
 /** The configured Better Auth plugin with this `id`, if any. */
 export const findPlugin = (auth: Auth, id: string): PluginLike | undefined =>
@@ -22,7 +23,7 @@ export function bridgeOf(auth: Auth): NestBridge {
 		findPlugin(auth, "nestjs") as { [NEST_BRIDGE]?: NestBridge } | undefined
 	)?.[NEST_BRIDGE];
 	if (!bridge)
-		throw new Error(
+		throw new BetterAuthConfigurationError(
 			"BetterAuthModule needs Better Auth's nestjs() plugin: add it to betterAuth({ plugins: [nestjs()] }), imported from 'nestjs-better-auth-adapter/plugin'.",
 		);
 	return bridge;

@@ -631,5 +631,11 @@ describe("authorization e2e: BetterAuthAccessControl", () => {
 		expect(() =>
 			BetterAuthACPolicy("x", { statements: { admin: ["before"] } }),
 		).toThrow(/reserved/);
+		// An ability by that name would replace BetterAuthPolicy's helper.
+		expect(() =>
+			BetterAuthACPolicy("x", {
+				statements: { admin: ["memberHasPermission"] },
+			}),
+		).toThrow(/reserved/);
 	});
 });

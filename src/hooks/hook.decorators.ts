@@ -8,8 +8,10 @@ import {
 	DATABASE_HOOK_KEY,
 	HOOK_KEY,
 } from "../constants.ts";
-
-export type { AuthHookContext } from "../plugin/bridge.ts";
+import type {
+	DatabaseHookModel,
+	DatabaseHookOperation,
+} from "../interfaces/hooks.interface.ts";
 
 /**
  * Marks a provider whose methods are Better Auth request hooks
@@ -33,12 +35,6 @@ export const BeforeHook = (path?: `/${string}`): CustomDecorator<symbol> =>
  */
 export const AfterHook = (path?: `/${string}`): CustomDecorator<symbol> =>
 	SetMetadata(AFTER_HOOK_KEY, path);
-
-/** The models Better Auth runs database hooks for. */
-export type DatabaseHookModel = "user" | "session" | "account" | "verification";
-
-/** The operations Better Auth runs database hooks for. */
-export type DatabaseHookOperation = "create" | "update" | "delete";
 
 /** Marks a provider whose methods are Better Auth database hooks (`@BeforeCreate()`…). */
 export const DatabaseHook = (): ClassDecorator =>
