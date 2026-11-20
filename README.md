@@ -1159,7 +1159,34 @@ Guests are denied, and Nest answers `401` for them; a signed-in user without the
 
 `AuthenticationModule`'s guard covers resolvers and gateways. The providers read the request (GraphQL), socket.io's handshake, or, on the `ws` adapter, the upgrade request `WsAuthenticator` keeps on the client.
 
-- **GraphQL:** build the context per request, `context: ({ req, res }) => ({ req, res })`; Nest refuses an object at startup. With `res` in it, the session's refreshed cookies reach the browser.
+- **GraphQL:** the providers read the request as `context.req`, and the session provider sends its refreshed cookies through the response, `context.res` (Express) or `context.reply` (Fastify). What each driver needs (all tested on Express and Fastify):
+
+| Driver | `context` |
+| --- | --- |
+| `ApolloDriver`, `ApolloFederationDriver` (`@nestjs/apollo`), on Express | `({ req, res }) => ({ req, res })` |
+| The same, on Fastify | `(req, reply) => ({ req, reply })`: Apollo passes Fastify's request and reply as two arguments |
+| `YogaDriver`, `YogaFederationDriver` (`@graphql-yoga/nestjs`) | Nothing: Yoga's context is `{ req, res }` on Express, `{ req, reply }` on Fastify |
+
+  Build Apollo's context per request: Nest refuses an object at startup. Without the response in it, requests still authenticate, but the cookies `getSession()` refreshes (sliding expiry, the cookie cache) never reach the browser.
+- **Subscriptions over SSE** (Yoga's, on the GraphQL endpoint) are authenticated like queries, by the session cookie, a `Bearer` token or an OAuth access token on a subscription with `@OAuthScopes()`. A subscription refused before its first event has errors and no `data`, which Yoga answers with a 500, unless the error carries `extensions.http.status`. A GraphQL exception filter can give it Nest's status, a 401 or a 403. Refused queries then get it too, instead of a 200:
+
+```ts
+import { Catch, HttpException } from "@nestjs/common";
+import type { GqlExceptionFilter } from "@nestjs/graphql";
+import { GraphQLError } from "graphql";
+
+@Catch(HttpException)
+export class HttpStatusFilter implements GqlExceptionFilter {
+  catch(exception: HttpException) {
+    return new GraphQLError(exception.message, {
+      originalError: exception,
+      extensions: { http: { status: exception.getStatus() } },
+    });
+  }
+}
+```
+
+- **Federation subgraphs:** Nest runs guards on a reference resolver (`@ResolveReference()`) only with `fieldResolverEnhancers: ["guards"]` in the `GraphQLModule` options. `@nestjs/authorization` fails at startup when `@Can()` is on one without it. With it, `@Authenticate()` and `@Can()` see the caller there as anywhere else, though a reference resolver gets no `args`.
 - **WebSockets:** send the cookie or `Authorization: Bearer <token>` in the handshake, or a `jwt()` JWT as `auth: { token }` (socket.io). Install `@nestjs/websockets`.
 
 Nest runs no guard on a gateway's `handleConnection()`, so authenticate the handshake with Nest's `WsAuthenticator`, as its docs show. It closes a connection nobody signed in on (1008, or socket.io's `disconnect()`), and the guard then authenticates every message again, so a session revoked mid-connection stops working:
