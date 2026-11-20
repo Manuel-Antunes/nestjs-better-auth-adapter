@@ -18,11 +18,14 @@ import {
 	UseFilters,
 } from "@nestjs/common";
 import {
+	Authenticate,
 	AuthenticationError,
 	AuthenticationRegistry,
 	CurrentSession,
 	CurrentUser,
+	type JwtClaims,
 } from "@nestjs/authentication";
+import { admin } from "better-auth/plugins/admin";
 import { jwt } from "better-auth/plugins/jwt";
 import request from "supertest";
 import {
@@ -56,6 +59,37 @@ function oauthAuth(options: BetterAuthOAuthProviderOptions, order = 3) {
 		}
 	}
 	return OAuthAuth;
+}
+
+/** What a `client_credentials` token stands for, in the app below. */
+type ClientPrincipal = { kind: "client"; clientId: string };
+/** The app's own view of a user, without Better Auth's `banned` field. */
+type AppUser = { kind: "user"; id: string };
+
+/**
+ * An API that also admits `client_credentials` tokens, on the routes that
+ * ask for it, with principals of its own.
+ */
+@Injectable()
+class MachineOAuthAuth extends BetterAuthOAuthProvider<
+	ClientPrincipal | AppUser
+> {
+	constructor(
+		@Inject(AuthenticationRegistry) registry: AuthenticationRegistry,
+	) {
+		// OAuthAuth serves this audience's metadata.
+		super({ audience: API, resourceMetadata: false });
+		registry.registerProvider(this, { order: 9 });
+	}
+
+	protected override async validate(
+		claims: JwtClaims,
+	): Promise<ClientPrincipal | AppUser | null> {
+		if (this.isClientCredentials(claims))
+			return { kind: "client", clientId: String(claims.azp) };
+		const user = await super.validate(claims);
+		return user && "id" in user ? { kind: "user", id: user.id } : null;
+	}
 }
 
 /**
@@ -115,6 +149,13 @@ class ApiController {
 		return { userId };
 	}
 
+	@Authenticate({ providers: [MachineOAuthAuth] })
+	@OAuthScopes("read:post")
+	@Get("machine/posts")
+	machinePosts(@CurrentUser() caller: ClientPrincipal | AppUser) {
+		return { caller };
+	}
+
 	/** No `@OAuthScopes()`: a first-party route. */
 	@Get("account")
 	account(@CurrentUser("id") userId: string) {
@@ -127,6 +168,7 @@ const createAuth = () =>
 		baseURL: ORIGIN,
 		disabledPaths: ["/token"],
 		plugins: [
+			admin(),
 			// The audience of jwt()'s own JWTs is this API too: they share the
 			// keys, the issuer and the audience with the access tokens.
 			jwt({
@@ -169,6 +211,7 @@ describe("oauthProvider() through BetterAuthOAuthProviderModule", () => {
 					audience: API,
 					resourceMetadata: { scopes_supported: ["read:post"] },
 				}),
+				MachineOAuthAuth,
 			],
 			controllers: [ApiController],
 		}));
@@ -452,7 +495,8 @@ describe("oauthProvider() through BetterAuthOAuthProviderModule", () => {
 			);
 		});
 
-		it("refuses client_credentials tokens, which have no user", async () => {
+		/** A `client_credentials` token for a new client, and the client. */
+		const clientCredentials = async () => {
 			const user = await signIn();
 			const client = await createClient(user.cookie, {
 				grant_types: ["client_credentials"],
@@ -470,12 +514,69 @@ describe("oauthProvider() through BetterAuthOAuthProviderModule", () => {
 					resource: API,
 				});
 			expect(token.status).toBe(200);
+			return { client, accessToken: token.body.access_token as string };
+		};
+
+		it("refuses client_credentials tokens, which have no user", async () => {
+			const { accessToken } = await clientCredentials();
 
 			const response = await request(server)
 				.get("/api/posts")
-				.set("Authorization", `Bearer ${token.body.access_token}`);
+				.set("Authorization", `Bearer ${accessToken}`);
 			expect(response.status).toBe(403);
 			expect(response.body.errorCode).toBe("user_required");
+		});
+
+		describe("a provider whose validate() admits clients", () => {
+			it("authenticates a client_credentials token as the principal it returns", async () => {
+				const { client, accessToken } = await clientCredentials();
+
+				const response = await request(server)
+					.get("/api/machine/posts")
+					.set("Authorization", `Bearer ${accessToken}`);
+				expect(response.status).toBe(200);
+				expect(response.body.caller).toEqual({
+					kind: "client",
+					clientId: client.client_id,
+				});
+			});
+
+			it("authenticates a user's token as the principal it builds for them", async () => {
+				const user = await signIn();
+				const client = await createClient(user.cookie);
+				const { access_token } = await authorize(user, client, {
+					scope: "openid read:post",
+					resource: API,
+				});
+
+				const response = await request(server)
+					.get("/api/machine/posts")
+					.set("Authorization", `Bearer ${access_token}`);
+				expect(response.status).toBe(200);
+				expect(response.body.caller).toEqual({
+					kind: "user",
+					id: user.userId,
+				});
+			});
+
+			it("still refuses a banned user's token, though its principal has no ban field", async () => {
+				const user = await signIn();
+				const client = await createClient(user.cookie);
+				const { access_token } = await authorize(user, client, {
+					scope: "openid read:post",
+					resource: API,
+				});
+				const ctx = await auth.$context;
+				await ctx.internalAdapter.updateUser(user.userId, { banned: true });
+
+				for (const path of ["/api/machine/posts", "/api/posts"]) {
+					const response = await request(server)
+						.get(path)
+						.set("Authorization", `Bearer ${access_token}`);
+					expect(response.status).toBe(403);
+					expect(response.body.errorCode).toBe("banned_user");
+				}
+			});
 		});
 
 		it("verifies DPoP-bound tokens against the proof for this request", async () => {
