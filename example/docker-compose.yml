@@ -1,0 +1,46 @@
+# Local infrastructure: `bun run db:up`. Ports are shifted (5433, 6380, 1026,
+# 8026) so they don't clash with a Postgres, Redis or Mailpit already running
+# on the host.
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: acme
+      POSTGRES_PASSWORD: acme
+      POSTGRES_DB: acme
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U acme -d acme"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  # Better Auth's secondary storage. The sessions live only here, so the
+  # append-only file keeps them across restarts.
+  redis:
+    image: redis:8-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6380}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  # Catches every email the app sends: http://localhost:8026
+  mailpit:
+    image: axllent/mailpit:v1.27
+    ports:
+      - "${SMTP_PORT:-1026}:1025"
+      - "${MAILPIT_UI_PORT:-8026}:8025"
+
+volumes:
+  postgres-data:
+  redis-data:
