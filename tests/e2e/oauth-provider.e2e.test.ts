@@ -44,6 +44,8 @@ const ORIGIN = "http://localhost:3000";
 const ISSUER = `${ORIGIN}/api/auth`;
 /** This API, as a resource server. */
 const API = `${ORIGIN}/api`;
+/** Another resource this app serves: its MCP endpoint. */
+const MCP = `${ORIGIN}/mcp`;
 const REDIRECT = "https://client.test/callback";
 const METADATA = `${ORIGIN}/.well-known/oauth-protected-resource/api`;
 
@@ -89,6 +91,27 @@ class MachineOAuthAuth extends BetterAuthOAuthProvider<
 			return { kind: "client", clientId: String(claims.azp) };
 		const user = await super.validate(claims);
 		return user && "id" in user ? { kind: "user", id: user.id } : null;
+	}
+}
+
+/** A resource server of both identifiers, on the routes that ask for it. */
+@Injectable()
+class BothAudiencesAuth extends BetterAuthOAuthProvider {
+	constructor(
+		@Inject(AuthenticationRegistry) registry: AuthenticationRegistry,
+	) {
+		super({ audience: [API, MCP], resourceMetadata: false });
+		registry.registerProvider(this, { order: 10 });
+	}
+}
+
+@Controller("mcp")
+class McpController {
+	@Authenticate({ providers: [BothAudiencesAuth] })
+	@OAuthScopes("read:post")
+	@Get("posts")
+	posts(@CurrentUser("id") userId: string) {
+		return { userId };
 	}
 }
 
@@ -156,6 +179,13 @@ class ApiController {
 		return { caller };
 	}
 
+	@Authenticate({ providers: [BothAudiencesAuth] })
+	@OAuthScopes("read:post")
+	@Get("both/posts")
+	bothPosts(@CurrentUser("id") userId: string) {
+		return { userId };
+	}
+
 	/** No `@OAuthScopes()`: a first-party route. */
 	@Get("account")
 	account(@CurrentUser("id") userId: string) {
@@ -179,8 +209,8 @@ const createAuth = () =>
 				loginPage: "/sign-in",
 				consentPage: "/consent",
 				scopes: ["openid", "profile", "email", "offline_access", "read:post"],
-				resources: [API],
-				clientRegistrationDefaultResources: [API],
+				resources: [API, MCP],
+				clientRegistrationDefaultResources: [API, MCP],
 				// Lets the tests set client_credentials_scopes.
 				clientPrivileges: () => true,
 			}),
@@ -212,8 +242,9 @@ describe("oauthProvider() through BetterAuthOAuthProviderModule", () => {
 					resourceMetadata: { scopes_supported: ["read:post"] },
 				}),
 				MachineOAuthAuth,
+				BothAudiencesAuth,
 			],
-			controllers: [ApiController],
+			controllers: [ApiController, McpController],
 		}));
 		server = app.getHttpServer();
 	});
@@ -527,6 +558,74 @@ describe("oauthProvider() through BetterAuthOAuthProviderModule", () => {
 			expect(response.body.errorCode).toBe("user_required");
 		});
 
+		describe("a provider with several audiences", () => {
+			const tokenFor = async (resource: string) => {
+				const user = await signIn();
+				const client = await createClient(user.cookie);
+				const { access_token } = await authorize(user, client, {
+					scope: "openid read:post",
+					resource,
+				});
+				return { user, accessToken: access_token };
+			};
+
+			it("accepts a token for any of them, wherever it is asked", async () => {
+				for (const resource of [API, MCP]) {
+					const { user, accessToken } = await tokenFor(resource);
+					for (const path of ["/mcp/posts", "/api/both/posts"]) {
+						const response = await request(server)
+							.get(path)
+							.set("Authorization", `Bearer ${accessToken}`);
+						expect(response.status).toBe(200);
+						expect(response.body.userId).toBe(user.userId);
+					}
+				}
+			});
+
+			it("leaves a single-audience provider refusing the others", async () => {
+				const { accessToken } = await tokenFor(MCP);
+				const response = await request(server)
+					.get("/api/posts")
+					.set("Authorization", `Bearer ${accessToken}`);
+				expect(response.status).toBe(401);
+			});
+
+			it("points its challenges to the audience the request's path is under", async () => {
+				const metadataOf = (resource: string) =>
+					resource.replace(
+						ORIGIN,
+						`${ORIGIN}/.well-known/oauth-protected-resource`,
+					);
+				const firstMetadata = (header: string | undefined) =>
+					/resource_metadata="([^"]*)"/.exec(header ?? "")?.[1];
+
+				for (const [path, resource] of [
+					["/mcp/posts", MCP],
+					["/api/both/posts", API],
+				] as const) {
+					const none = await request(server).get(path);
+					expect(none.status).toBe(401);
+					expect(none.headers["www-authenticate"]).toBe(
+						`Bearer resource_metadata="${metadataOf(resource)}"`,
+					);
+
+					// The resource client's own refusal lists each audience, this one first.
+					const { accessToken } = await tokenFor(API);
+					const [header, payload] = accessToken.split(".");
+					const forged = await request(server)
+						.get(path)
+						.set(
+							"Authorization",
+							`Bearer ${header}.${payload}.${randomBytes(64).toString("base64url")}`,
+						);
+					expect(forged.status).toBe(401);
+					expect(firstMetadata(forged.headers["www-authenticate"])).toBe(
+						metadataOf(resource),
+					);
+				}
+			});
+		});
+
 		describe("a provider whose validate() admits clients", () => {
 			it("authenticates a client_credentials token as the principal it returns", async () => {
 				const { client, accessToken } = await clientCredentials();
@@ -768,6 +867,48 @@ describe("BetterAuthOAuthProvider settings", () => {
 				controllers: [],
 			}),
 		).rejects.toThrow(/both serve the resource metadata/);
+	});
+
+	it("serves one resource metadata document per audience", async () => {
+		const { app } = await createTestApp({
+			auth: createAuth(),
+			imports: [BetterAuthOAuthProviderModule],
+			providers: [oauthAuth({ audience: [API, MCP] })],
+			controllers: [],
+		});
+		try {
+			for (const [path, resource] of [
+				["/.well-known/oauth-protected-resource/api", API],
+				["/.well-known/oauth-protected-resource/mcp", MCP],
+			]) {
+				const response = await request(app.getHttpServer())
+					.get(path)
+					.expect(200);
+				expect(response.body.resource).toBe(resource);
+			}
+		} finally {
+			await app.close();
+		}
+	});
+
+	it.each([
+		["no audience", [], /non-empty array/],
+		["one that isn't an http(s) URL", [API, "urn:mcp"], /urn:mcp/],
+		["one listed twice", [API, API], /twice/],
+		[
+			"two whose metadata would share a path",
+			[API, "https://other.example/api"],
+			/same path/,
+		],
+	])("fails at startup on audiences with %s", async (_, audience, message) => {
+		await expect(
+			createTestApp({
+				auth: createAuth(),
+				imports: [BetterAuthOAuthProviderModule],
+				providers: [oauthAuth({ audience })],
+				controllers: [],
+			}),
+		).rejects.toThrow(message);
 	});
 
 	it("fails at startup on an audience that isn't an http(s) URL", async () => {

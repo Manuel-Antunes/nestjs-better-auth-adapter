@@ -32,6 +32,30 @@ export async function getRequestFromContext(context: ExecutionContext) {
 }
 
 /**
+ * The path of the request behind a call, without its query, read
+ * synchronously: the HTTP request's (GraphQL's `context.req` included) or a
+ * WebSocket's handshake. `undefined` when there is none (RPC).
+ */
+export function getRequestPathSync(
+	context: ExecutionContext,
+): string | undefined {
+	const contextType = context.getType<"graphql" | "ws" | "http">();
+	// biome-ignore lint/suspicious/noExplicitAny: the request type depends on the transport
+	let request: any;
+	if (contextType === "ws") {
+		const client = context.switchToWs().getClient();
+		request = client?.handshake ?? client?.request;
+	} else if (contextType === "graphql") {
+		// A resolver's arguments: root, args, context, info.
+		request = context.getArgByIndex(2)?.req;
+	} else if (contextType === "http") {
+		request = context.switchToHttp().getRequest();
+	}
+	const url = request?.originalUrl ?? request?.url ?? request?.raw?.url;
+	return typeof url === "string" ? url.split("?", 1)[0] : undefined;
+}
+
+/**
  * The request behind a call, as far as authentication needs it, as
  * `@nestjs/authentication` reads it: the HTTP request, GraphQL's
  * `context.req`, or a WebSocket's handshake (socket.io's `handshake`, or

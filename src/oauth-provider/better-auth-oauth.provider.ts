@@ -20,20 +20,24 @@ import { BetterAuthConfigurationError } from "../errors/better-auth-configuratio
 import type { BetterAuthUser } from "../interfaces/better-auth-session.interface.ts";
 import { isOAuthAccessToken } from "../oauth/access-token.ts";
 import { assertNotBanned, checksBans } from "../providers/banned-user.ts";
-import { getRequestFromContext } from "../utils.ts";
+import { getRequestFromContext, getRequestPathSync } from "../utils.ts";
 import { OAuthAccessTokenError } from "./errors/oauth-access-token.error.ts";
 import { OAuthAccessTokenNotAcceptedError } from "./errors/oauth-access-token-not-accepted.error.ts";
 import { OAuthInsufficientScopeError } from "./errors/oauth-insufficient-scope.error.ts";
 import { OAuthUserRequiredError } from "./errors/oauth-user-required.error.ts";
 import type { BetterAuthOAuthProviderOptions } from "./interfaces/better-auth-oauth-provider-options.interface.ts";
 import type { BetterAuthOAuthAccessToken } from "./interfaces/oauth-access-token.interface.ts";
-import type { OAuthResourceSettings } from "./interfaces/oauth-resource.interface.ts";
+import type {
+	OAuthResourceIdentifier,
+	OAuthResourceSettings,
+} from "./interfaces/oauth-resource.interface.ts";
 import { OAUTH_SCOPES } from "./oauth-scopes.decorator.ts";
 import { OAuthResourceDocuments } from "./oauth-resource-documents.ts";
 import {
 	assertOAuthResourceServer,
 	resolveOAuthResource,
 	resourceClientOf,
+	resourceForPath,
 } from "./resource-server.ts";
 
 /**
@@ -57,7 +61,8 @@ import {
  *   in-process, issuer, audience, expiry, and DPoP proofs when the token is
  *   sender-constrained (`Authorization: DPoP`). Clients get these by
  *   requesting the `resource`; the plugin issues opaque tokens without one,
- *   which are meant for its `userinfo` endpoint only.
+ *   which are meant for its `userinfo` endpoint only. With several
+ *   audiences, a token passes when its `aud` has any of them.
  * - Routes accept them only with `@OAuthScopes()`, and only when they carry
  *   its scopes: a 403 with RFC 6750's `insufficient_scope` challenge
  *   otherwise. A user's token never stands for their whole session.
@@ -113,19 +118,24 @@ export abstract class BetterAuthOAuthProvider<
 		const auth = this.betterAuth.instance;
 		assertOAuthResourceServer(auth, name);
 		const settings = this.#settings;
-		if (!settings.metadataPath) return;
-		const client = await resourceClientOf(auth);
-		this.documents.add(
-			settings.metadataPath,
-			name,
-			JSON.stringify(
-				await client.getProtectedResourceMetadata({
-					resource: settings.audience,
-					bearer_methods_supported: ["header"],
-					...settings.metadata,
-				}),
-			),
+		const served = settings.resources.filter(
+			({ metadataPath }) => metadataPath,
 		);
+		if (!served.length) return;
+		const client = await resourceClientOf(auth);
+		for (const { audience, metadataPath } of served) {
+			this.documents.add(
+				metadataPath as string,
+				name,
+				JSON.stringify(
+					await client.getProtectedResourceMetadata({
+						resource: audience,
+						bearer_methods_supported: ["header"],
+						...settings.metadata,
+					}),
+				),
+			);
+		}
 	}
 
 	async authenticate(
@@ -150,6 +160,8 @@ export abstract class BetterAuthOAuthProvider<
 			[context.getHandler(), context.getClass()],
 		);
 
+		const target = await this.target(context);
+		const resource = this.resourceFor(context);
 		let claims: Record<string, unknown>;
 		try {
 			const client = await resourceClientOf(this.betterAuth.instance);
@@ -157,11 +169,11 @@ export abstract class BetterAuthOAuthProvider<
 				{
 					authorizationHeader: authorization,
 					dpopProofJwt: this.header(context, "dpop"),
-					...(await this.target(context)),
+					...target,
 				},
 				{
 					verifyOptions: {
-						audience: settings.audience,
+						audience: this.audiences(resource),
 						// Session JWTs of jwt() share the keys, issuer and maybe the
 						// audience: only these tell an access token apart.
 						typ: "at+jwt",
@@ -187,9 +199,9 @@ export abstract class BetterAuthOAuthProvider<
 		]);
 		if (!user) {
 			if (client) throw new OAuthUserRequiredError();
-			throw this.invalid(settings, "unknown user");
+			throw this.invalid(resource, "unknown user");
 		}
-		if (!sessionAlive) throw this.invalid(settings, "session ended");
+		if (!sessionAlive) throw this.invalid(resource, "session ended");
 		// A client's token has no user to ban. A user's always has one: their
 		// ban applies whatever principal validate() built for them.
 		this.#checkBans ??= checksBans(this.betterAuth.instance);
@@ -198,7 +210,7 @@ export abstract class BetterAuthOAuthProvider<
 				"banned" in user
 					? (user as BetterAuthUser)
 					: await this.findUser(this.getSubject(claims));
-			if (!granter) throw this.invalid(settings, "unknown user");
+			if (!granter) throw this.invalid(resource, "unknown user");
 			assertNotBanned(granter);
 		}
 
@@ -263,9 +275,36 @@ export abstract class BetterAuthOAuthProvider<
 		return String(claims.sub ?? "");
 	}
 
-	/** `WWW-Authenticate` challenge sent with a 401 when no provider found credentials. */
-	challenge(): string {
-		return `Bearer resource_metadata="${this.#settings.metadataUrl}"`;
+	/**
+	 * `WWW-Authenticate` challenge sent with a 401 when no provider found
+	 * credentials: the metadata of the audience the request is for (the
+	 * first audience's without a `context`).
+	 */
+	challenge(context?: ExecutionContext): string {
+		return `Bearer resource_metadata="${this.resourceFor(context).metadataUrl}"`;
+	}
+
+	/** The audience a request is for, by its path: what its challenges point to. */
+	private resourceFor(context?: ExecutionContext): OAuthResourceIdentifier {
+		return resourceForPath(
+			this.#settings.resources,
+			context && getRequestPathSync(context),
+		);
+	}
+
+	/**
+	 * Every audience, `resource`'s first: the resource client's challenges
+	 * list one per audience, in this order, and clients read the first.
+	 */
+	private audiences(resource: OAuthResourceIdentifier): string | string[] {
+		const { resources } = this.#settings;
+		if (resources.length === 1) return resource.audience;
+		return [
+			resource.audience,
+			...resources
+				.filter((other) => other !== resource)
+				.map(({ audience }) => audience),
+		];
 	}
 
 	/** The method and absolute URL a DPoP proof signs (`htm`, `htu`). */
@@ -342,9 +381,9 @@ export abstract class BetterAuthOAuthProvider<
 		);
 	}
 
-	private invalid(settings: OAuthResourceSettings, description: string) {
+	private invalid(resource: OAuthResourceIdentifier, description: string) {
 		return new OAuthAccessTokenError(description, {
-			challenge: `Bearer error="invalid_token", error_description="${description}", resource_metadata="${settings.metadataUrl}"`,
+			challenge: `Bearer error="invalid_token", error_description="${description}", resource_metadata="${resource.metadataUrl}"`,
 		});
 	}
 }

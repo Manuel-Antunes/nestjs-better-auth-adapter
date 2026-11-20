@@ -7,13 +7,19 @@ export interface BetterAuthOAuthProviderOptions {
 	 * clients request tokens for, which becomes their `aud`. Tokens
 	 * for other resources, and those requested without one, are
 	 * refused. One of the plugin's `resources`.
+	 *
+	 * Several, for an API that is the resource server of more than one
+	 * identifier: a token passes when its `aud` has any of them. Each gets
+	 * its own metadata, and challenges point to the one whose path the
+	 * request's path is under (the longest), else the first.
 	 */
-	audience: string;
+	audience: string | readonly string[];
 	/**
 	 * Fields of the RFC 9728 metadata `BetterAuthOAuthProviderModule` serves
 	 * at `/.well-known/oauth-protected-resource{audience path}` (such as
-	 * `scopes_supported`), which `WWW-Authenticate` challenges point
-	 * clients to; `false` to not serve it.
+	 * `scopes_supported`), one document per audience, which
+	 * `WWW-Authenticate` challenges point clients to; `false` to not serve
+	 * them.
 	 * @default {}
 	 */
 	resourceMetadata?: Record<string, unknown> | false;
