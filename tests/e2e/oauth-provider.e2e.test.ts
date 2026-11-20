@@ -1,10 +1,4 @@
-import {
-	createHash,
-	generateKeyPairSync,
-	randomBytes,
-	randomUUID,
-	sign,
-} from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { oauthProvider } from "@better-auth/oauth-provider";
 import {
 	type ArgumentsHost,
@@ -39,6 +33,13 @@ import {
 	OAuthScopes,
 } from "../../src/oauth-provider/index.ts";
 import { createTestApp, createTestAuth, uniqueEmail } from "../shared/app.ts";
+import {
+	REDIRECT,
+	dpopKey,
+	type OAuthApi,
+	type OAuthClient,
+	oauthFlows,
+} from "../shared/oauth.ts";
 
 const ORIGIN = "http://localhost:3000";
 const ISSUER = `${ORIGIN}/api/auth`;
@@ -46,7 +47,6 @@ const ISSUER = `${ORIGIN}/api/auth`;
 const API = `${ORIGIN}/api`;
 /** Another resource this app serves: its MCP endpoint. */
 const MCP = `${ORIGIN}/mcp`;
-const REDIRECT = "https://client.test/callback";
 const METADATA = `${ORIGIN}/.well-known/oauth-protected-resource/api`;
 
 /** The app's OAuth provider for `options`, registered at `order`. */
@@ -217,15 +217,6 @@ const createAuth = () =>
 		],
 	});
 
-type Client = { client_id: string; client_secret: string };
-/** The plugin's API, which createTestAuth()'s type doesn't carry. */
-type OAuthApi = {
-	adminCreateOAuthClient(input: {
-		headers: Headers;
-		body: Record<string, unknown>;
-	}): Promise<unknown>;
-};
-
 describe("oauthProvider() through BetterAuthOAuthProviderModule", () => {
 	let app: Awaited<ReturnType<typeof createTestApp>>["app"];
 	let auth: ReturnType<typeof createAuth>;
@@ -253,79 +244,11 @@ describe("oauthProvider() through BetterAuthOAuthProviderModule", () => {
 		await app.close();
 	});
 
-	/** A signed-in user: their session cookie. */
-	const signIn = async () => {
-		const response = await request(server)
-			.post("/api/auth/sign-up/email")
-			.send({ email: uniqueEmail(), password: "password1234", name: "User" });
-		const cookie = (response.headers["set-cookie"] as unknown as string[])
-			.map((value) => value.split(";")[0])
-			.join("; ");
-		return { cookie, userId: response.body.user.id as string };
-	};
-
-	const createClient = async (
-		cookie: string,
-		body: Record<string, unknown> = {},
-	): Promise<Client> =>
-		(await (auth.api as unknown as OAuthApi).adminCreateOAuthClient({
-			headers: new Headers({ cookie }),
-			body: {
-				redirect_uris: [REDIRECT],
-				skip_consent: true,
-				scope: "openid profile read:post",
-				...body,
-			},
-		})) as Client;
-
-	/** The authorization code flow, PKCE and all, without consent. */
-	const authorize = async (
-		user: { cookie: string },
-		client: Client,
-		{
-			scope,
-			resource,
-			dpop,
-		}: { scope: string; resource?: string; dpop?: DpopKey },
-	) => {
-		const verifier = randomBytes(32).toString("base64url");
-		const query = new URLSearchParams({
-			response_type: "code",
-			client_id: client.client_id,
-			redirect_uri: REDIRECT,
-			scope,
-			state: "state",
-			code_challenge: createHash("sha256").update(verifier).digest("base64url"),
-			code_challenge_method: "S256",
-			...(resource && { resource }),
-		});
-		const redirect = await request(server)
-			.get(`/api/auth/oauth2/authorize?${query}`)
-			.set("Cookie", user.cookie);
-		const code = new URL(redirect.headers.location as string).searchParams.get(
-			"code",
-		);
-		expect(code).toBeTruthy();
-
-		const token = request(server)
-			.post("/api/auth/oauth2/token")
-			.type("form")
-			.auth(client.client_id, client.client_secret);
-		if (dpop) token.set("DPoP", dpop.proof("POST", `${ISSUER}/oauth2/token`));
-		const response = await token.send({
-			grant_type: "authorization_code",
-			code,
-			redirect_uri: REDIRECT,
-			code_verifier: verifier,
-			...(resource && { resource }),
-		});
-		expect(response.status).toBe(200);
-		return response.body as {
-			access_token: string;
-			id_token?: string;
-			token_type: string;
-		};
-	};
+	const { signIn, createClient, authorize } = oauthFlows({
+		server: () => server,
+		auth: () => auth,
+		issuer: ISSUER,
+	});
 
 	describe("discovery", () => {
 		it("serves RFC 8414's metadata at the root, outside the base path", async () => {
@@ -788,7 +711,7 @@ describe("oauthProvider() without a BetterAuthOAuthProvider (an authorization se
 					skip_consent: true,
 					scope: "openid read:post",
 				},
-			})) as Client;
+			})) as OAuthClient;
 			const verifier = randomBytes(32).toString("base64url");
 			const redirect = await request(server)
 				.get(
@@ -938,35 +861,3 @@ describe("BetterAuthOAuthProvider settings", () => {
 		).rejects.toThrow(/unknown/i);
 	});
 });
-
-type DpopKey = ReturnType<typeof dpopKey>;
-
-/** A client's DPoP key, signing proofs (RFC 9449) with ES256. */
-function dpopKey() {
-	const { privateKey, publicKey } = generateKeyPairSync("ec", {
-		namedCurve: "P-256",
-	});
-	const { kty, crv, x, y } = publicKey.export({ format: "jwk" });
-	const encode = (value: object) =>
-		Buffer.from(JSON.stringify(value)).toString("base64url");
-	return {
-		proof(method: string, url: string, accessToken?: string) {
-			const input = `${encode({ typ: "dpop+jwt", alg: "ES256", jwk: { kty, crv, x, y } })}.${encode(
-				{
-					jti: randomUUID(),
-					htm: method,
-					htu: url,
-					iat: Math.floor(Date.now() / 1000),
-					...(accessToken && {
-						ath: createHash("sha256").update(accessToken).digest("base64url"),
-					}),
-				},
-			)}`;
-			const signature = sign("sha256", Buffer.from(input), {
-				key: privateKey,
-				dsaEncoding: "ieee-p1363",
-			});
-			return `${input}.${signature.toString("base64url")}`;
-		},
-	};
-}
