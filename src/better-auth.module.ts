@@ -44,6 +44,7 @@ import {
 	resolveBodyParserOptions,
 } from "./http/middlewares.ts";
 import { oauthDiscoveryPaths } from "./oauth/discovery-paths.ts";
+import { assertNoThallespOptions } from "./options/thallesp-options.ts";
 import { BetterAuthPasswordHasherBinding } from "./password-hasher.binding.ts";
 import { resetBridge } from "./plugin/bridge.ts";
 import { bridgeOf } from "./plugins.ts";
@@ -51,9 +52,10 @@ import { bridgeOf } from "./plugins.ts";
 /**
  * Better Auth for Nest, through `@nestjs/authentication`:
  *
- * - serves Better Auth's routes, always, where Better Auth expects them
- *   (the path of its `baseURL`, else its `basePath`), and re-adds body
- *   parsing for every other route;
+ * - serves Better Auth's routes where Better Auth expects them (the path
+ *   of its `baseURL`, else its `basePath`), and re-adds body parsing for
+ *   every other route; `routes: false` serves none, for an app that only
+ *   authenticates its callers;
  * - gives the credential providers the app extends (`BetterAuthSessionProvider`
  *   and the others) what they need, so `AuthenticationGuard`,
  *   `@CurrentUser()`, `@CurrentSession()`, `@Authenticate()` and
@@ -63,7 +65,7 @@ import { bridgeOf } from "./plugins.ts";
  *   inside it, and publishes its flows as `AuthenticationEvents`, through
  *   the `nestjs()` plugin;
  * - with `oauthProvider()`, serves its discovery documents outside the base
- *   path too. Accepting its access tokens is `BetterAuthOAuthProviderModule`'s,
+ *   path too, unless `routes: false`. Accepting its access tokens is `BetterAuthOAuthProviderModule`'s,
  *   from `nestjs-better-auth-adapter/oauth-provider`.
  *
  * It registers no credential provider: the app extends
@@ -106,6 +108,8 @@ export class BetterAuthModule
 {
 	private readonly logger = new Logger(BetterAuthModule.name);
 	private readonly basePath: string;
+	/** Whether this app serves Better Auth's routes (`routes`). */
+	private readonly servesRoutes: boolean;
 	/** Paths outside `basePath` that Better Auth's handler answers. */
 	private readonly discoveryPaths: Set<string>;
 	/** Better Auth's own origin check, once its context resolved. */
@@ -118,9 +122,24 @@ export class BetterAuthModule
 		private readonly options: BetterAuthModuleOptions,
 	) {
 		super();
+		assertNoThallespOptions(this.options);
 		// Where Better Auth's router expects its routes: they are served there,
 		// whatever the global prefix.
 		this.basePath = resolveBasePath(this.options.auth.options);
+		this.servesRoutes = this.options.routes !== false;
+		if (!this.servesRoutes) {
+			// Options of the handler and its parsers: silently ignoring them would
+			// hide a misconfiguration (a webhook's `rawBody` that never comes).
+			const ignored = (["bodyParser", "middleware"] as const).filter(
+				(option) => this.options[option] !== undefined,
+			);
+			if (ignored.length)
+				throw new BetterAuthConfigurationError(
+					`BetterAuthModule's ${ignored.join(" and ")} only apply to Better Auth's routes, which routes: false doesn't serve: remove ${ignored.length > 1 ? "them" : "it"}, and configure Nest's own body parser.`,
+				);
+			this.discoveryPaths = new Set();
+			return;
+		}
 		this.discoveryPaths = new Set(
 			oauthDiscoveryPaths(this.options.auth, this.basePath),
 		);
@@ -148,7 +167,7 @@ export class BetterAuthModule
 	 */
 	async onModuleInit(): Promise<void> {
 		bridgeOf(this.options.auth);
-		if (this.options.trustedOriginsCors !== false) {
+		if (this.servesRoutes && this.options.trustedOriginsCors !== false) {
 			const ctx = await this.options.auth.$context;
 			this.isTrustedOrigin = cachedOriginCheck((origin) =>
 				ctx.isTrustedOrigin(origin),
@@ -163,6 +182,12 @@ export class BetterAuthModule
 
 	/** Mounts Better Auth's handler, its CORS and the body parsers on the HTTP adapter. */
 	configure(_consumer: MiddlewareConsumer): void {
+		if (!this.servesRoutes) {
+			this.logger.log(
+				"Better Auth's routes are not served by this app (routes: false)",
+			);
+			return;
+		}
 		const httpAdapter = this.adapterHost.httpAdapter;
 		const isFastify = httpAdapter.getType() === "fastify";
 		const bodyParser = resolveBodyParserOptions(this.options);

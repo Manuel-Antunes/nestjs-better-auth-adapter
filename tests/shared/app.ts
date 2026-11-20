@@ -191,6 +191,11 @@ export interface TestAppOptions {
 	authorization?: boolean;
 	graphql?: boolean;
 	globalPrefix?: string;
+	/**
+	 * Keep Nest's own body parser, as an app with `routes: false` does.
+	 * @default false
+	 */
+	nestBodyParser?: boolean;
 	/** Listen on a random port, for clients other than supertest (socket.io). */
 	listen?: boolean;
 	/** The WebSocket adapter, e.g. `(app) => new WsAdapter(app)`; socket.io's by default. */
@@ -234,10 +239,11 @@ export async function createTestApp(options: TestAppOptions) {
 		imports: [AppModule],
 	}).compile();
 
-	// Better Auth parses its own bodies: Nest's parser must be off.
+	// Better Auth parses its own bodies: Nest's parser must be off, unless
+	// the app serves none of its routes.
 	const app: INestApplication = moduleRef.createNestApplication(
 		createTestHttpAdapter(),
-		{ bodyParser: false, logger: false },
+		{ bodyParser: options.nestBodyParser ?? false, logger: false },
 	);
 	if (options.globalPrefix) app.setGlobalPrefix(options.globalPrefix);
 	if (options.webSocketAdapter)

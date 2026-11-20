@@ -32,6 +32,7 @@ Every integration past authentication is optional: without the matching Nest pro
 - [GraphQL and WebSockets](#graphql-and-websockets)
 - [Options](#options)
 - [Example app](#example-app)
+- [Coming from `@thallesp/nestjs-better-auth`](#coming-from-thallespnestjs-better-auth)
 - [Credits](#credits)
 
 ## Install
@@ -99,7 +100,7 @@ export class SessionAuth extends BetterAuthSessionProvider {
 
 Add `SessionAuth` to the `providers` of a module, the `AppModule` or your auth module.
 
-**4. Turn Nest's body parser off.** Better Auth reads the raw body of its own routes; this module adds the parsers back for every other route.
+**4. Turn Nest's body parser off.** Better Auth reads the raw body of its own routes; this module adds the parsers back for every other route. (Not with [`routes: false`](#serving-better-auths-routes-from-one-service-only), which leaves body parsing to Nest.)
 
 ```ts
 // main.ts
@@ -584,7 +585,7 @@ export class StepUpHooks {
 
 ### Routes, CORS and body parsing
 
-- Better Auth's routes are always served, where Better Auth's own router expects them: the path of its `baseURL` (the option, or `BETTER_AUTH_URL`) when it has one, else its `basePath` (`/api/auth` by default). To move them, change Better Auth's config, `betterAuth({ basePath: "/auth" })`: the module follows. The path is normalized (`auth/` serves `/auth`), kept outside any global prefix, and can't be `/`. `BetterAuthService.basePath` gives it back, to build links to Better Auth's endpoints.
+- Better Auth's routes are served where Better Auth's own router expects them: the path of its `baseURL` (the option, or `BETTER_AUTH_URL`) when it has one, else its `basePath` (`/api/auth` by default). To move them, change Better Auth's config, `betterAuth({ basePath: "/auth" })`: the module follows. The path is normalized (`auth/` serves `/auth`), kept outside any global prefix, and can't be `/`. `BetterAuthService.basePath` gives it back, to build links to Better Auth's endpoints.
 - Better Auth's routes answer CORS for the origins Better Auth trusts, with credentials, matched by Better Auth itself: its `trustedOrigins` with their wildcards, `BETTER_AUTH_TRUSTED_ORIGINS`, its `baseURL`. Express and Fastify behave the same. CORS for your own routes is yours, with `app.enableCors()`. `trustedOriginsCors: false` leaves Better Auth's routes to it too. A function `trustedOrigins` needs `trustedOriginsCors: false`.
 - Body parsing for the other routes is configurable, Express and Fastify alike:
 
@@ -607,6 +608,24 @@ BetterAuthModule.forRoot({
   middleware: (req, res, next) => RequestContext.create(orm.em, next),
 });
 ```
+
+### Serving Better Auth's routes from one service only
+
+In a platform where several Nest services share one Better Auth (one database, one secret, one secondary storage), one of them serves its routes and the others only authenticate their callers: a GraphQL gateway, a worker, an agent runtime. On those, `routes: false` mounts nothing, so sign-up and sign-in aren't answered on a host never meant to answer them:
+
+```ts
+BetterAuthModule.forRoot({ auth, routes: false });
+```
+
+```ts
+// main.ts: Nest's own body parser stays on (rawBody: true works again)
+const app = await NestFactory.create(AppModule);
+```
+
+- Nothing is mounted: not Better Auth's handler, its CORS, the body parsers, nor `oauthProvider()`'s discovery documents (the authorization server's, served by the service with the routes). The base path isn't excluded from the global prefix either.
+- The credential providers, `@Hook()` / `@DatabaseHook()`, the Nest handlers, `AuthenticationEvents` and `BetterAuthService` work the same: they call Better Auth in-process. `BetterAuthService.basePath` still gives the path of the routes, for links to the service that serves them.
+- `BetterAuthOAuthProviderModule` still serves the RFC 9728 resource metadata: an app that accepts access tokens is a resource server, whichever service issues them.
+- `bodyParser` and `middleware` only apply to the routes: with `routes: false`, they fail at startup rather than being ignored.
 
 ## Scaling: secondary storage and the cookie cache
 
@@ -1131,6 +1150,7 @@ With socket.io, `WsAuthenticator` reads the handshake itself: `authenticateConne
 | Option | Default | |
 | --- | --- | --- |
 | `auth` | required | The `betterAuth({...})` instance, with the `nestjs()` plugin. |
+| `routes` | `true` | Serve Better Auth's routes; `false` for an app that only authenticates ([above](#serving-better-auths-routes-from-one-service-only)). |
 | `trustedOriginsCors` | `true` | CORS on Better Auth's routes for the origins it trusts. |
 | `bodyParser.json` / `.urlencoded` | enabled | Parser options, and `enabled: false`. |
 | `bodyParser.rawBody` | `false` | Attach `req.rawBody`. |
@@ -1160,6 +1180,22 @@ bun run test:dist  # boots an app from dist/, with no TypeScript transform
 ```
 
 The example is a workspace of this repository; see [its README](example/README.md) to run it.
+
+## Coming from `@thallesp/nestjs-better-auth`
+
+Each of its module options has a counterpart. Those with another name or owner here fail at startup with the replacement, rather than being ignored:
+
+| `@thallesp/nestjs-better-auth` | Here |
+| --- | --- |
+| `disableControllers: true` | `BetterAuthModule.forRoot({ auth, routes: false })` |
+| `disableGlobalAuthGuard: true` | `AuthenticationModule.forRoot({ globalGuard: false })`: the guard is `@nestjs/authentication`'s |
+| `disableTrustedOriginsCors: true` | `trustedOriginsCors: false` |
+| `bodyParser` (`json`, `urlencoded`, `rawBody`) | `bodyParser`, the same shape |
+| `disableBodyParser` / `enableRawBodyParser` (deprecated there) | `bodyParser.json.enabled` / `bodyParser.urlencoded.enabled` / `bodyParser.rawBody` |
+| `middleware` | `middleware` |
+| `isGlobal` | `isGlobal` |
+
+Its guard and decorators (`@AllowAnonymous()`, `@OptionalAuth()`, `@Session()`) are `@nestjs/authentication`'s here (`@Public()`, `@Authenticate({ optional: true })`, `@CurrentUser()` / `@CurrentSession()`), with [credential providers](#credential-providers) you register.
 
 ## Credits
 

@@ -15,6 +15,17 @@ export interface BetterAuthModuleOptions<A = Auth> {
 	/** The `betterAuth({...})` instance. */
 	auth: A;
 	/**
+	 * Serve Better Auth's routes (sign-up, sign-in, `/oauth2/*`...) and
+	 * `oauthProvider()`'s discovery documents from this app. `false` for an
+	 * app that holds the instance only to authenticate its callers, when
+	 * another service serves them: nothing is mounted, Nest's own body parser
+	 * stays in charge (leave it on), and `trustedOriginsCors`, `bodyParser`
+	 * and `middleware` don't apply. Providers, hooks, handlers and
+	 * `BetterAuthService` work the same.
+	 * @default true
+	 */
+	routes?: boolean;
+	/**
 	 * Enable CORS for Better Auth's `trustedOrigins` (a string array). Turn it
 	 * off to configure CORS yourself.
 	 * @default true
@@ -23,6 +34,16 @@ export interface BetterAuthModuleOptions<A = Auth> {
 	bodyParser?: BetterAuthBodyParserOptions;
 	/** Wraps Better Auth's handler, e.g. for request-scoped contexts like MikroORM's `RequestContext`. */
 	middleware?: BetterAuthMiddleware;
+	/** @deprecated `@thallesp/nestjs-better-auth`'s option, refused at startup: use `routes: false`. */
+	disableControllers?: never;
+	/** @deprecated `@thallesp/nestjs-better-auth`'s option, refused at startup: the guard is `@nestjs/authentication`'s, `AuthenticationModule.forRoot({ globalGuard: false })`. */
+	disableGlobalAuthGuard?: never;
+	/** @deprecated `@thallesp/nestjs-better-auth`'s option, refused at startup: use `trustedOriginsCors: false`. */
+	disableTrustedOriginsCors?: never;
+	/** @deprecated `@thallesp/nestjs-better-auth`'s option, refused at startup: use `bodyParser.json.enabled` and `bodyParser.urlencoded.enabled`. */
+	disableBodyParser?: never;
+	/** @deprecated `@thallesp/nestjs-better-auth`'s option, refused at startup: use `bodyParser.rawBody`. */
+	enableRawBodyParser?: never;
 }
 
 /** What a `forRootAsync({ useClass })` or `useExisting` class implements. */
