@@ -63,15 +63,23 @@ import {
  *   otherwise. A user's token never stands for their whole session.
  * - `@CurrentUser()` is the user who granted the token, and
  *   `@CurrentSession()` its claims ({@link BetterAuthOAuthAccessToken}).
- *   Tokens of the `client_credentials` grant have no user, and are refused.
+ *   Tokens of the `client_credentials` grant have no user, and are refused
+ *   with a 403 `user_required`, unless `validate()` returns a principal for
+ *   the client: `TPrincipal` types it, and the user is then
+ *   `BetterAuthUser | TPrincipal`.
  * - 401s carry RFC 9728's `resource_metadata`, which points clients (MCP
  *   clients among them) to the authorization server.
  *   `BetterAuthOAuthProviderModule`, which the app imports, serves it.
  *
  * Never counts as a second factor.
  */
-export abstract class BetterAuthOAuthProvider
-	extends AuthenticationProvider<BetterAuthUser, BetterAuthOAuthAccessToken>
+export abstract class BetterAuthOAuthProvider<
+		TPrincipal extends object = BetterAuthUser,
+	>
+	extends AuthenticationProvider<
+		BetterAuthUser | TPrincipal,
+		BetterAuthOAuthAccessToken
+	>
 	implements OnModuleInit
 {
 	@Inject(BetterAuthService) protected readonly betterAuth!: BetterAuthService;
@@ -123,7 +131,7 @@ export abstract class BetterAuthOAuthProvider
 	async authenticate(
 		context: ExecutionContext,
 	): Promise<AuthenticationResult<
-		BetterAuthUser,
+		BetterAuthUser | TPrincipal,
 		BetterAuthOAuthAccessToken
 	> | null> {
 		const settings = this.#settings;
@@ -169,7 +177,7 @@ export abstract class BetterAuthOAuthProvider
 
 		if (!scopes) throw new OAuthAccessTokenNotAcceptedError();
 
-		const subject = this.getSubject(claims);
+		const client = this.isClientCredentials(claims);
 		// Two lookups by primary key, at once.
 		const [user, sessionAlive] = await Promise.all([
 			this.validate(claims),
@@ -178,12 +186,21 @@ export abstract class BetterAuthOAuthProvider
 				: true,
 		]);
 		if (!user) {
-			if (subject && subject === claims.azp) throw new OAuthUserRequiredError();
+			if (client) throw new OAuthUserRequiredError();
 			throw this.invalid(settings, "unknown user");
 		}
 		if (!sessionAlive) throw this.invalid(settings, "session ended");
+		// A client's token has no user to ban. A user's always has one: their
+		// ban applies whatever principal validate() built for them.
 		this.#checkBans ??= checksBans(this.betterAuth.instance);
-		if (this.#checkBans) assertNotBanned(user);
+		if (this.#checkBans && !client) {
+			const granter =
+				"banned" in user
+					? (user as BetterAuthUser)
+					: await this.findUser(this.getSubject(claims));
+			if (!granter) throw this.invalid(settings, "unknown user");
+			assertNotBanned(granter);
+		}
 
 		const scope = typeof claims.scope === "string" ? claims.scope : undefined;
 		return {
@@ -196,19 +213,39 @@ export abstract class BetterAuthOAuthProvider
 	}
 
 	/**
-	 * The user who granted a verified access token: its `sub`, looked up, or
-	 * `null` to refuse it (a 401; a 403 `user_required` for a
-	 * `client_credentials` token). Override it to add checks, and call
-	 * `super.validate()` to keep the lookup. Users the `admin()` plugin
-	 * banned are refused after it, whatever it returns.
+	 * Who a verified access token stands for: by default the user who
+	 * granted it, its `sub` looked up, or `null` to refuse it (a 401; a 403
+	 * `user_required` for a `client_credentials` token, which has no user).
+	 * Override it to add checks, and call `super.validate()` to keep the
+	 * lookup; or to admit `client_credentials` tokens, return a
+	 * `TPrincipal` for the client when `isClientCredentials(claims)`.
+	 *
+	 * For a user's token, users the `admin()` plugin banned are refused
+	 * after it, whatever it returns: a principal without the user's
+	 * `banned` field costs a second lookup, which keeping `super.validate()`'s
+	 * fields (`{ ...user, ... }`) avoids.
 	 */
-	protected async validate(claims: JwtClaims): Promise<BetterAuthUser | null> {
+	protected async validate(
+		claims: JwtClaims,
+	): Promise<BetterAuthUser | TPrincipal | null> {
+		return this.findUser(this.getSubject(claims));
+	}
+
+	/**
+	 * Whether a verified access token is a `client_credentials` one: issued
+	 * to a client for itself (`sub` is its `azp`), with no user.
+	 */
+	protected isClientCredentials(claims: JwtClaims): boolean {
 		const subject = this.getSubject(claims);
-		return subject
-			? ((await (
-					await this.betterAuth.instance.$context
-				).internalAdapter.findUserById(subject)) as BetterAuthUser | null)
-			: null;
+		return !!subject && subject === claims.azp;
+	}
+
+	private async findUser(subject: string): Promise<BetterAuthUser | null> {
+		if (!subject) return null;
+		const ctx = await this.betterAuth.instance.$context;
+		return (await ctx.internalAdapter.findUserById(
+			subject,
+		)) as BetterAuthUser | null;
 	}
 
 	/** Whether the session the token was issued from (`sid`) is still on, as introspection checks it. */

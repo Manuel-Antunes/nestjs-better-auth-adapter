@@ -244,7 +244,7 @@ export class ApiKeyAuth extends BetterAuthApiKeyProvider {
 | `BetterAuthOAuthProvider` | The verified access token's claims | The user of `sub` |
 
 - Return `null` to refuse the credentials, or throw an `AuthenticationError` of your own. Call `super.validate()` to keep the default lookup.
-- Bans (`admin()`) are checked after `validate()`, whatever it returns.
+- Bans (`admin()`) are checked after `validate()`, whatever it returns. For `BetterAuthOAuthProvider`, that holds for every token a user granted; a `client_credentials` token has no user to ban ([below](#admitting-client_credentials-tokens)).
 - `@Authenticate({ providers: [BetterAuthSessionProvider] })` matches every subclass.
 
 ### Errors
@@ -415,11 +415,48 @@ export class PostsController {
   - Elsewhere, an access token gets a 403 (`access_token_not_accepted`): a token a user granted another app never stands for their whole session.
   - A missing scope gets a 403 with RFC 6750's `insufficient_scope` challenge naming it.
   - The session, `jwt()` JWTs and API keys work as before on these routes.
-- **The user.** `@CurrentUser()` is the user who granted the token. `client_credentials` tokens have no user and get a 403 (`user_required`).
+- **The user.** `@CurrentUser()` is the user who granted the token. `client_credentials` tokens have no user and get a 403 (`user_required`), unless your provider admits them ([below](#admitting-client_credentials-tokens)).
 - **Revocation.** As with introspection, a token stops working once the session it was granted from ends (sign-out, revoked session). `checkSession: false` skips that lookup, and tokens then pass until they expire.
 - **Discovery for clients.** 401s point clients to `/.well-known/oauth-protected-resource/api` (RFC 9728), and MCP clients find the authorization server through it. Each provider builds its document at startup and hands it to `BetterAuthOAuthProviderModule`, which serves it to any origin, one per `audience`. A provider fails at startup without the module.
 - **With secondary storage.** `oauthProvider()` then needs `session.storeSessionInDatabase: true`, and fails at startup without it: it reads sessions from the database, and so does `checkSession`. See [scaling](#scaling-secondary-storage-and-the-cookie-cache).
 - **Behind a proxy.** DPoP proofs sign the request's URL, so set Express's or Fastify's `trust proxy` for the scheme and host to be the client's.
+
+#### Admitting `client_credentials` tokens
+
+A `client_credentials` token is a client calling for itself: its `sub` is its `azp`, and no user stands behind it. To admit them, return a principal for the client from `validate()`, and type it with `BetterAuthOAuthProvider`'s type parameter. `@CurrentUser()` is then `BetterAuthUser | TPrincipal`:
+
+```ts
+export type ApiClient = { kind: "client"; clientId: string };
+
+@Injectable()
+export class MachineAuth extends BetterAuthOAuthProvider<ApiClient> {
+  constructor(registry: AuthenticationRegistry) {
+    super({ audience: "https://example.com/api" });
+    registry.registerProvider(this, { order: 3 });
+  }
+
+  protected override async validate(claims: JwtClaims) {
+    if (this.isClientCredentials(claims))
+      return { kind: "client" as const, clientId: String(claims.azp) };
+    return super.validate(claims); // users' tokens, as before
+  }
+}
+```
+
+```ts
+@OAuthScopes("sync:orders")
+@Post("orders/sync")
+sync(@CurrentUser() caller: User | ApiClient, @CurrentSession() token: BetterAuthOAuthAccessToken) {
+  if ("kind" in caller) {
+    // a client: token.azp, token.scopes
+  }
+}
+```
+
+- `@OAuthScopes()` still applies: a client's token passes only with the route's scopes, those in the client's `client_credentials_scopes`.
+- A client is not a user. Give the principal a discriminant (`kind` above), and in the policies of routes that admit clients, check it before reading user fields, and before the [access control policies](#policies-backed-by-better-auths-access-control)' helpers, which take a Better Auth user.
+- Bans still apply to every token a user granted, whatever principal `validate()` builds for them. A principal without the user's `banned` field costs a second lookup to check it; keep `super.validate()`'s fields (`{ ...user, kind: "user" }`) to avoid it.
+- A subclass that doesn't override `validate()` keeps refusing them with `user_required`. To admit them on some routes only, register the subclass after the one that refuses them, and pick it with `@Authenticate({ providers: [MachineAuth] })` on those routes, with `resourceMetadata: false` if both have the same `audience`.
 
 ## Module configuration
 
