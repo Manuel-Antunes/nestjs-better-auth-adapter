@@ -46,8 +46,10 @@ export function getRequestPathSync(
 		const client = context.switchToWs().getClient();
 		request = client?.handshake ?? client?.request;
 	} else if (contextType === "graphql") {
-		// A resolver's arguments: root, args, context, info.
-		request = context.getArgByIndex(2)?.req;
+		// A resolver's arguments are (root, args, context, info); a federation
+		// reference resolver's, (reference, context, info).
+		const args = context.getArgs();
+		request = (args.length === 3 ? args[1] : args[2])?.req;
 	} else if (contextType === "http") {
 		request = context.switchToHttp().getRequest();
 	}
