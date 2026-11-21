@@ -649,6 +649,15 @@ BetterAuthModule.forRoot({
 });
 ```
 
+- With `jwt()`, its JWKS (`/api/auth/jwks`, or its `jwks.jwksPath`) is sent with a `Cache-Control`, which Better Auth doesn't send: it's the document every resource server fetches before it accepts a token, and a CDN can then serve it while the issuer is cold or down. By default, the policy `oauthProvider()` sends with the discovery documents pointing at it, `public, max-age=15, stale-while-revalidate=15, stale-if-error=86400`. `jwksCacheControl` replaces it, `false` sends none. It only fills a missing header, on a 200: if Better Auth sends its own, it wins. With `jwks.remoteUrl`, the JWKS is published there and not served here: there's nothing to send it with, and a `jwksCacheControl` policy fails at startup.
+
+```ts
+BetterAuthModule.forRoot({
+  auth,
+  jwksCacheControl: "public, max-age=300, stale-while-revalidate=86400, stale-if-error=86400",
+});
+```
+
 - `middleware` wraps Better Auth's handler, e.g. for MikroORM's `RequestContext`:
 
 ```ts
@@ -674,7 +683,7 @@ const app = await NestFactory.create(AppModule);
 - Nothing is mounted: not Better Auth's handler, its CORS, the body parsers, nor `oauthProvider()`'s discovery documents (the authorization server's, served by the service with the routes). The base path isn't excluded from the global prefix either.
 - The credential providers, `@Hook()` / `@DatabaseHook()`, the Nest handlers, `AuthenticationEvents` and `BetterAuthService` work the same: they call Better Auth in-process. `BetterAuthService.basePath` still gives the path of the routes, for links to the service that serves them.
 - `BetterAuthOAuthProviderModule` still serves the RFC 9728 resource metadata: an app that accepts access tokens is a resource server, whichever service issues them.
-- `bodyParser` and `middleware` only apply to the routes: with `routes: false`, they fail at startup rather than being ignored.
+- `bodyParser`, `middleware` and a `jwksCacheControl` policy only apply to the routes: with `routes: false`, they fail at startup rather than being ignored.
 
 ## Scaling: secondary storage and the cookie cache
 
@@ -1284,6 +1293,7 @@ With socket.io, `WsAuthenticator` reads the handshake itself: `authenticateConne
 | `auth` | required | The `betterAuth({...})` instance, with the `nestjs()` plugin. |
 | `routes` | `true` | Serve Better Auth's routes; `false` for an app that only authenticates ([above](#serving-better-auths-routes-from-one-service-only)). |
 | `trustedOriginsCors` | `true` | CORS on Better Auth's routes for the origins it trusts. |
+| `jwksCacheControl` | `oauthProvider()`'s metadata policy | The `Cache-Control` of `jwt()`'s JWKS, when Better Auth sends none; `false` for none ([above](#routes-cors-and-body-parsing)). |
 | `bodyParser.json` / `.urlencoded` | enabled | Parser options, and `enabled: false`. |
 | `bodyParser.rawBody` | `false` | Attach `req.rawBody`. |
 | `middleware` | | Wraps Better Auth's handler. |

@@ -32,6 +32,10 @@ import { BetterAuthHooksExplorer } from "./hooks/hooks.explorer.ts";
 import { resolveBasePath } from "./http/base-path.ts";
 import { configureFastifyBodyParser } from "./http/fastify-body-parser.ts";
 import {
+	fillCacheControl,
+	resolveJwksCacheControl,
+} from "./http/jwks-cache-control.ts";
+import {
 	cachedOriginCheck,
 	handleTrustedOriginsCors,
 } from "./http/trusted-origins-cors.ts";
@@ -65,8 +69,11 @@ import { bridgeOf } from "./plugins.ts";
  *   inside it, and publishes its flows as `AuthenticationEvents`, through
  *   the `nestjs()` plugin;
  * - with `oauthProvider()`, serves its discovery documents outside the base
- *   path too, unless `routes: false`. Accepting its access tokens is `BetterAuthOAuthProviderModule`'s,
- *   from `nestjs-better-auth-adapter/oauth-provider`.
+ *   path too, unless `routes: false`. Accepting its access tokens is
+ *   `BetterAuthOAuthProviderModule`'s, from
+ *   `nestjs-better-auth-adapter/oauth-provider`;
+ * - with `jwt()`, sends its JWKS with a `Cache-Control`
+ *   (`jwksCacheControl`), which Better Auth doesn't.
  *
  * It registers no credential provider: the app extends
  * `BetterAuthSessionProvider` and the others, and registers them in
@@ -112,6 +119,8 @@ export class BetterAuthModule
 	private readonly servesRoutes: boolean;
 	/** Paths outside `basePath` that Better Auth's handler answers. */
 	private readonly discoveryPaths: Set<string>;
+	/** The `jwt()` plugin's JWKS, and the `Cache-Control` it's sent with. */
+	private readonly jwks?: { path: string; cacheControl: string };
 	/** Better Auth's own origin check, once its context resolved. */
 	private isTrustedOrigin?: (origin: string) => boolean;
 
@@ -137,11 +146,20 @@ export class BetterAuthModule
 				throw new BetterAuthConfigurationError(
 					`BetterAuthModule's ${ignored.join(" and ")} only apply to Better Auth's routes, which routes: false doesn't serve: remove ${ignored.length > 1 ? "them" : "it"}, and configure Nest's own body parser.`,
 				);
+			if (typeof this.options.jwksCacheControl === "string")
+				throw new BetterAuthConfigurationError(
+					"BetterAuthModule's jwksCacheControl is for the JWKS Better Auth's routes serve, which routes: false doesn't: remove it, and send the header where the JWKS is served.",
+				);
 			this.discoveryPaths = new Set();
 			return;
 		}
 		this.discoveryPaths = new Set(
 			oauthDiscoveryPaths(this.options.auth, this.basePath),
+		);
+		this.jwks = resolveJwksCacheControl(
+			this.options.auth,
+			this.basePath,
+			this.options.jwksCacheControl,
 		);
 		const prefixOptions = applicationConfig.getGlobalPrefixOptions();
 		applicationConfig.setGlobalPrefixOptions({
@@ -213,6 +231,7 @@ export class BetterAuthModule
 		}
 
 		const handler = toNodeHandler(this.options.auth);
+		const jwks = this.jwks;
 		httpAdapter.use(
 			(
 				// biome-ignore lint/suspicious/noExplicitAny: the request type depends on the HTTP adapter
@@ -221,9 +240,10 @@ export class BetterAuthModule
 				res: any,
 				next: () => void,
 			) => {
+				const path = getRequestPath(req).split("?", 1)[0] ?? "";
 				if (
 					!matchesBasePath(req, this.basePath) &&
-					!this.discoveryPaths.has(getRequestPath(req).split("?", 1)[0] ?? "")
+					!this.discoveryPaths.has(path)
 				)
 					return next();
 				// Only Better Auth's routes: CORS for the app's own is the app's
@@ -238,6 +258,8 @@ export class BetterAuthModule
 
 				const nodeReq = getNodeRequest(req);
 				const nodeRes = getNodeResponse(res);
+				if (jwks && path.replace(/\/+$/, "") === jwks.path)
+					fillCacheControl(nodeRes, jwks.cacheControl);
 				if (this.options.middleware) {
 					return this.options.middleware(req, res, () =>
 						handler(nodeReq, nodeRes),
