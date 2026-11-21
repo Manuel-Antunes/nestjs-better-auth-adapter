@@ -2,6 +2,10 @@ import type { AuthenticationModuleOptions } from "@nestjs/authentication";
 import { BetterAuthConfigurationError } from "../errors/better-auth-configuration.error.ts";
 import type { LinkFeature } from "../interfaces/handlers.interface.ts";
 
+/** A date `seconds` from now, for the links Better Auth hands to a callback. */
+export const expiresIn = (seconds: number): Date =>
+	new Date(Date.now() + seconds * 1000);
+
 /**
  * The link a handler sends: the app's page, the `url` of the feature's
  * `AuthenticationModule` option, with Better Auth's token in `?token=`, and

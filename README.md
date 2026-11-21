@@ -1004,6 +1004,42 @@ betterAuth({
 
 Existing Better Auth hashes keep verifying (`legacyHashes: false` turns that off). They are upgraded the next time Better Auth verifies the password (any sign-in, challenged by two-factor or not, or a password change), as are hashes made with an older cost. The upgrade is one conditional write, through the `nestjs()` plugin: a hash changed meanwhile is left alone, and a failed upgrade is logged without failing the sign-in.
 
+### Your own callbacks: `BetterAuthConfigAugmenter`
+
+For Better Auth callbacks no Nest handler covers (`user.changeEmail.sendChangeEmailConfirmation`, `user.deleteUser.sendDeleteAccountVerification`, `user.deleteUser.beforeDelete`…), plug a provider of yours in with `BetterAuthConfigAugmenter`, which the handlers above use too. It's typed from the instance's type: the paths are the callbacks of the sections it configures, and each callback takes the signature Better Auth declares.
+
+```ts
+@Injectable()
+export class AccountMails implements OnModuleInit, OnModuleDestroy {
+  readonly #config: BetterAuthConfigAugmenter<typeof auth>;
+
+  constructor(betterAuth: BetterAuthService<typeof auth>, private readonly mailer: Mailer) {
+    this.#config = new BetterAuthConfigAugmenter(betterAuth.instance)
+      .replace("user.changeEmail.sendChangeEmailConfirmation", async ({ user, newEmail, url }) =>
+        this.mailer.send(user.email, `Confirm the change to ${newEmail}`, url),
+      )
+      .replace("user.deleteUser.sendDeleteAccountVerification", async ({ user, url }) =>
+        this.mailer.send(user.email, "Confirm the deletion of your account", url),
+      );
+  }
+
+  onModuleInit() {
+    return this.#config.apply();
+  }
+
+  onModuleDestroy() {
+    this.#config.restore();
+  }
+}
+```
+
+- **In order.** `replace()`, `wrap()` and `plugin()` queue their changes, in the order they're called; `apply()` makes them, once Better Auth built its context. `restore()` puts back what they replaced, last first, so two changes of one callback undo cleanly.
+- **`wrap(path, (original) => callback)`** runs code around the config's own callback (`undefined` when it has none), rather than replace it.
+- **`plugin(id, (plugin) => …)`** reaches a plugin's callbacks, typed as the plugin declares its options: `plugin("magic-link", (magicLink) => magicLink.replace("sendMagicLink", …))`. The id must be one of the instance's plugins.
+- **Where Better Auth reads them.** Better Auth copies its options into its context when the instance is created, and its endpoints read that copy: changes go to both, and to the context alone for a section only it has (one a plugin's `init()` added). Top-level options are refused, as are `database`, `secondaryStorage`, `logger` and `plugins`, which aren't config.
+- **Fails rather than does nothing.** A section the instance doesn't configure fails at `apply()`, naming it: a callback doesn't turn its feature on (`user.deleteUser` needs `enabled: true`). `{ create: true }` creates the sections, for those without a feature to turn on (`user` for `user.validateUserInfo`). So does a key holding something else than a callback, and a path through `__proto__`.
+- **Types.** With `typeof auth` (or `BetterAuthService<typeof auth>`), only the configured sections' paths are offered; with `Auth`, every section's, still typed by Better Auth's schema. `BetterAuthCallbackPath<Options>` and `BetterAuthCallbackAt<Options, Path>` give them to your own code.
+
 ## Authorization
 
 Requires `@nestjs/authorization`. Import `AuthorizationModule.forRoot()`: it denies every route without `@Can()` or `@Can.Anyone()`.

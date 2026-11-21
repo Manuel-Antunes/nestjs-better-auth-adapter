@@ -4,14 +4,17 @@ import {
 	MagicLinkHandler,
 } from "@nestjs/authentication";
 import type { GenericEndpointContext } from "better-auth";
+import type { MagicLinkOptions } from "better-auth/plugins/magic-link";
 import { authenticationOptionsOf } from "../better-auth.service.ts";
+import { BetterAuthConfigAugmenter } from "../config/better-auth-config-augmenter.ts";
 import type { AnyBetterAuthService } from "../interfaces/better-auth-service.interface.ts";
 import { BetterAuthConfigurationError } from "../errors/better-auth-configuration.error.ts";
-import { findPlugin } from "../plugins.ts";
+import { findPlugin, hasPlugin } from "../plugins.ts";
 import type { BetterAuthMagicLink } from "../interfaces/handler-links.interface.ts";
-import type { ConfigObject } from "../interfaces/handlers.interface.ts";
-import { expiresIn, replaceCallback } from "./better-auth-config.ts";
-import { featureOptions, pageLink } from "./links.ts";
+import { expiresIn, featureOptions, pageLink } from "./links.ts";
+
+/** The plugin's `sendMagicLink`, as `magicLink()` declares it. */
+type SendMagicLink = MagicLinkOptions["sendMagicLink"];
 import { OwnedByBetterAuthError } from "../errors/owned-by-better-auth.error.ts";
 
 /**
@@ -39,7 +42,10 @@ export abstract class BetterAuthMagicLinkHandler
 {
 	readonly #registry: AuthenticationRegistry;
 	readonly #betterAuth: AnyBetterAuthService;
-	#restore?: () => void;
+	/** Plugs `send()` into Better Auth: built here, applied once registered. */
+	readonly #config: BetterAuthConfigAugmenter;
+	/** The feature's `url` in the `AuthenticationModule` options, read once registered. */
+	#page = "";
 
 	constructor(
 		registry: AuthenticationRegistry,
@@ -48,39 +54,52 @@ export abstract class BetterAuthMagicLinkHandler
 		super();
 		this.#registry = registry;
 		this.#betterAuth = betterAuth;
+		this.#config = new BetterAuthConfigAugmenter(betterAuth.instance).plugin(
+			"magic-link",
+			(magicLink) =>
+				magicLink.replace(
+					"sendMagicLink",
+					async (
+						{ email, url, token, metadata }: Parameters<SendMagicLink>[0],
+						context?: GenericEndpointContext,
+					) => {
+						// BetterAuthHandlersCheck refuses any other registered handler.
+						const handler = registry.handler("magicLink") as
+							| BetterAuthMagicLinkHandler
+							| undefined;
+						await handler?.send({
+							email,
+							url: pageLink(this.#page, token, url),
+							expiresAt: expiresIn(this.#expiresIn()),
+							token,
+							...(metadata !== undefined && { metadata }),
+							request: context?.request,
+							context,
+						});
+					},
+				),
+		);
 	}
 
 	/** Plugs the registered handler into Better Auth, if it's this one. */
-	onModuleInit(): void {
+	async onModuleInit(): Promise<void> {
 		if (this.#registry.handler("magicLink") !== this) return;
-		const options = findPlugin(this.#betterAuth.instance, "magic-link")
-			?.options as ConfigObject | undefined;
-		if (!options)
+		if (!hasPlugin(this.#betterAuth.instance, "magic-link"))
 			throw new BetterAuthConfigurationError(
 				"A magicLink handler is registered but Better Auth's magicLink() plugin is not configured. Add magicLink({ sendMagicLink: fromNestHandler }) to its plugins.",
 			);
-		const { url: page } = featureOptions(
+		this.#page = featureOptions(
 			authenticationOptionsOf(this.#betterAuth),
 			"magicLink",
-		);
-		this.#restore = replaceCallback(options, "magicLink.sendMagicLink", (async (
-			{ email, url, token, metadata }: ConfigObject,
-			context?: GenericEndpointContext,
-		) =>
-			// BetterAuthHandlersCheck refuses any other registered handler.
-			(
-				this.#registry.handler("magicLink") as
-					| BetterAuthMagicLinkHandler
-					| undefined
-			)?.send({
-				email,
-				url: pageLink(page, token, url),
-				expiresAt: expiresIn(options.expiresIn ?? 300),
-				token,
-				...(metadata !== undefined && { metadata }),
-				request: context?.request,
-				context,
-			})) as never);
+		).url;
+		await this.#config.apply();
+	}
+
+	/** How long the plugin's links last, in seconds: read at each link, as the plugin does. */
+	#expiresIn(): number {
+		const expires = findPlugin(this.#betterAuth.instance, "magic-link")?.options
+			?.expiresIn;
+		return typeof expires === "number" ? expires : 300;
 	}
 
 	/** Sends `link` to `link.email`, with what the plugin gave its callback. */
@@ -88,8 +107,7 @@ export abstract class BetterAuthMagicLinkHandler
 
 	/** Puts the plugin's own callback back. */
 	onModuleDestroy(): void {
-		this.#restore?.();
-		this.#restore = undefined;
+		this.#config.restore();
 	}
 
 	resolveUser(): never {
