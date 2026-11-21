@@ -24,7 +24,7 @@ import { OAuthScopesCheck } from "./oauth-scopes.check.ts";
  * origin. Better Auth's own discovery documents (an authorization server's)
  * stay `BetterAuthModule`'s, as all of Better Auth's routes.
  *
- * At startup, it fails on an `@OAuthScopes()` naming a scope that
+ * At startup, it fails on an `@OAuthScopes.require()` naming a scope that
  * `oauthProvider()` doesn't issue.
  *
  * @example

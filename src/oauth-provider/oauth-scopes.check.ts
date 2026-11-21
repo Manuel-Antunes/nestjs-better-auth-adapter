@@ -12,7 +12,7 @@ import { findPlugin } from "../plugins.ts";
 import { OAuthScopes } from "./oauth-scopes.decorator.ts";
 
 /**
- * Fails at startup on an `@OAuthScopes()` naming a scope `oauthProvider()`
+ * Fails at startup on an `@OAuthScopes.require()` naming a scope `oauthProvider()`
  * doesn't issue (`scopes`, or its defaults): no access token could carry
  * it, so the route would refuse them all, and a typo (`read:twin` for
  * `read:twins`) would only show as a 403 at runtime.
@@ -61,7 +61,7 @@ export class OAuthScopesCheck implements OnModuleInit {
 		}
 		if (unknown.length)
 			throw new BetterAuthConfigurationError(
-				`@OAuthScopes() names scopes oauthProvider() doesn't issue, which no access token could carry: ${unknown.join(", ")}. Fix the name, or add the scope to oauthProvider({ scopes }), which issues ${issued.map((s) => `'${s}'`).join(", ")}.`,
+				`@OAuthScopes.require() names scopes oauthProvider() doesn't issue, which no access token could carry: ${unknown.join(", ")}. Fix the name, or add the scope to oauthProvider({ scopes }), which issues ${issued.map((s) => `'${s}'`).join(", ")}.`,
 			);
 	}
 

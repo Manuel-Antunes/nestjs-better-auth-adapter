@@ -87,7 +87,7 @@ class CallerResolver {
 	}
 
 	@Authenticate({ optional: true })
-	@OAuthScopes("read:post")
+	@OAuthScopes.require("read:post")
 	@Can(CallerPolicy, "read")
 	@Query(() => String)
 	me(@CurrentUser("id") id: string) {
@@ -95,7 +95,7 @@ class CallerResolver {
 	}
 
 	@Authenticate({ optional: true })
-	@OAuthScopes("read:post")
+	@OAuthScopes.require("read:post")
 	@Can(CallerPolicy, "read")
 	@Subscription(() => String, { resolve: (id: string) => id })
 	async *callerIds(@CurrentUser("id") id: string) {

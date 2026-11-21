@@ -63,9 +63,10 @@ import {
  *   requesting the `resource`; the plugin issues opaque tokens without one,
  *   which are meant for its `userinfo` endpoint only. With several
  *   audiences, a token passes when its `aud` has any of them.
- * - Routes accept them only with `@OAuthScopes()`, and only when they carry
- *   its scopes: a 403 with RFC 6750's `insufficient_scope` challenge
- *   otherwise. A user's token never stands for their whole session.
+ * - Routes accept them only with `@OAuthScopes.require()`, when they carry
+ *   its scopes (a 403 with RFC 6750's `insufficient_scope` challenge
+ *   otherwise), or `@OAuthScopes.any()`. A user's token never stands for
+ *   their whole session. `scopesFor()` decides it, for a rule of your own.
  * - `@CurrentUser()` is the user who granted the token, and
  *   `@CurrentSession()` its claims ({@link BetterAuthOAuthAccessToken}).
  *   Tokens of the `client_credentials` grant have no user, and are refused
@@ -155,9 +156,7 @@ export abstract class BetterAuthOAuthProvider<
 		if (!dpop && !(/^bearer$/i.test(scheme) && isOAuthAccessToken(token)))
 			return null;
 
-		const scopes = this.reflector.getAllAndOverride<
-			readonly string[] | undefined
-		>(OAuthScopes, [context.getHandler(), context.getClass()]);
+		const scopes = this.scopesFor(context);
 
 		const target = await this.requestTarget(context);
 		const resource = this.resourceFor(context);
@@ -240,6 +239,35 @@ export abstract class BetterAuthOAuthProvider<
 		claims: JwtClaims,
 	): Promise<BetterAuthUser | TPrincipal | null> {
 		return this.findUser(this.getSubject(claims));
+	}
+
+	/**
+	 * The scopes a call requires of an access token: `undefined` refuses
+	 * access tokens (a 403 `access_token_not_accepted`), `[]` accepts any
+	 * issued for this API. By default what `@OAuthScopes.require()` or
+	 * `@OAuthScopes.any()` declared on the handler, else on its class.
+	 *
+	 * Override it for a rule of your own: a default for a whole module, one
+	 * per transport or context type. To accept access tokens where nothing
+	 * was declared, so that `@OAuthScopes.require()` appears only where a
+	 * scope is required:
+	 *
+	 * ```ts
+	 * protected override scopesFor(context: ExecutionContext) {
+	 *   return super.scopesFor(context) ?? [];
+	 * }
+	 * ```
+	 *
+	 * That gives up a guarantee: a token a user granted another app then
+	 * passes every route that forgot its `require()`, with no scope at all.
+	 */
+	protected scopesFor(
+		context: ExecutionContext,
+	): readonly string[] | undefined {
+		return this.reflector.getAllAndOverride<readonly string[] | undefined>(
+			OAuthScopes,
+			[context.getHandler(), context.getClass()],
+		);
 	}
 
 	/**
