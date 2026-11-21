@@ -43,3 +43,14 @@ export { findPlugin, hasPlugin } from "./plugins.ts";
 export * from "./providers/better-auth-api-key.provider.ts";
 export * from "./providers/better-auth-jwt.provider.ts";
 export * from "./providers/better-auth-session.provider.ts";
+export { BetterAuthConfigAugmenter } from "./config/better-auth-config-augmenter.ts";
+export { BetterAuthPluginConfigAugmenter } from "./config/better-auth-plugin-config-augmenter.ts";
+export type {
+	BetterAuthAugmentOptions,
+	BetterAuthCallback,
+	BetterAuthCallbackAt,
+	BetterAuthCallbackPath,
+	BetterAuthConfigHost,
+	BetterAuthPluginCallbackPath,
+	BetterAuthPluginOptions,
+} from "./interfaces/better-auth-config-augmenter.interface.ts";

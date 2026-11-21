@@ -59,6 +59,18 @@ expectTypeOf(findPlugin(wide, "admin")).toEqualTypeOf<
 	BetterAuthPlugin | undefined
 >();
 
+// With some plugins typed and others not (`plugins: BetterAuthPlugin[]`),
+// an id none of the typed ones has is one of the others.
+const mixed = betterAuth({
+	plugins: [bearer(), ...([] as BetterAuthPlugin[])],
+});
+expectTypeOf(findPlugin(mixed, "magic-link")).toEqualTypeOf<
+	BetterAuthPlugin | undefined
+>();
+expectTypeOf(findPlugin(mixed, "bearer")?.id).toEqualTypeOf<
+	"bearer" | undefined
+>();
+
 // And `Auth` still takes a concrete instance, as forRoot() needs.
 BetterAuthModule.forRoot({ auth });
 const asAuth: Auth = auth;

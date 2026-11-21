@@ -4,15 +4,11 @@ import {
 	PasswordResetHandler,
 } from "@nestjs/authentication";
 import { authenticationOptionsOf } from "../better-auth.service.ts";
+import { BetterAuthConfigAugmenter } from "../config/better-auth-config-augmenter.ts";
 import type { AnyBetterAuthService } from "../interfaces/better-auth-service.interface.ts";
+import type { BetterAuthUser } from "../interfaces/better-auth-session.interface.ts";
 import type { BetterAuthPasswordResetLink } from "../interfaces/handler-links.interface.ts";
-import type { ConfigObject } from "../interfaces/handlers.interface.ts";
-import {
-	configSection,
-	expiresIn,
-	replaceCallback,
-} from "./better-auth-config.ts";
-import { featureOptions, pageLink } from "./links.ts";
+import { expiresIn, featureOptions, pageLink } from "./links.ts";
 import { OwnedByBetterAuthError } from "../errors/owned-by-better-auth.error.ts";
 
 /**
@@ -55,7 +51,10 @@ export abstract class BetterAuthPasswordResetHandler
 {
 	readonly #registry: AuthenticationRegistry;
 	readonly #betterAuth: AnyBetterAuthService;
-	#restore?: () => void;
+	/** Plugs `send()` into Better Auth: built here, applied once registered. */
+	readonly #config: BetterAuthConfigAugmenter;
+	/** The feature's `url` in the `AuthenticationModule` options, read once registered. */
+	#page = "";
 
 	constructor(
 		registry: AuthenticationRegistry,
@@ -64,40 +63,37 @@ export abstract class BetterAuthPasswordResetHandler
 		super();
 		this.#registry = registry;
 		this.#betterAuth = betterAuth;
+		const auth = betterAuth.instance;
+		this.#config = new BetterAuthConfigAugmenter(auth).replace(
+			"emailAndPassword.sendResetPassword",
+			async ({ user, url, token }, request) => {
+				// BetterAuthHandlersCheck refuses any other registered handler.
+				const handler = registry.handler("passwordReset") as
+					| BetterAuthPasswordResetHandler
+					| undefined;
+				await handler?.send({
+					userId: user.id,
+					email: user.email,
+					url: pageLink(this.#page, token, url),
+					expiresAt: expiresIn(
+						auth.options.emailAndPassword?.resetPasswordTokenExpiresIn ?? 3600,
+					),
+					user: user as BetterAuthUser,
+					token,
+					request,
+				});
+			},
+		);
 	}
 
 	/** Plugs the registered handler into Better Auth, if it's this one. */
-	onModuleInit(): void {
+	async onModuleInit(): Promise<void> {
 		if (this.#registry.handler("passwordReset") !== this) return;
-		const { url: page } = featureOptions(
+		this.#page = featureOptions(
 			authenticationOptionsOf(this.#betterAuth),
 			"passwordReset",
-		);
-		const parent = configSection(
-			this.#betterAuth.instance.options as ConfigObject,
-			"emailAndPassword",
-			"passwordReset",
-			"emailAndPassword: { enabled: true }",
-		);
-		this.#restore = replaceCallback(
-			parent,
-			"emailAndPassword.sendResetPassword",
-			(async ({ user, url, token }: ConfigObject, request?: Request) =>
-				// BetterAuthHandlersCheck refuses any other registered handler.
-				(
-					this.#registry.handler("passwordReset") as
-						| BetterAuthPasswordResetHandler
-						| undefined
-				)?.send({
-					userId: user.id,
-					email: user.email,
-					url: pageLink(page, token, url),
-					expiresAt: expiresIn(parent.resetPasswordTokenExpiresIn ?? 3600),
-					user,
-					token,
-					request,
-				})) as never,
-		);
+		).url;
+		await this.#config.apply();
 	}
 
 	/** Sends `link` to `link.email`, with what Better Auth gave its callback. */
@@ -107,8 +103,7 @@ export abstract class BetterAuthPasswordResetHandler
 
 	/** Puts Better Auth's own callback back. */
 	onModuleDestroy(): void {
-		this.#restore?.();
-		this.#restore = undefined;
+		this.#config.restore();
 	}
 
 	findUser(): never {

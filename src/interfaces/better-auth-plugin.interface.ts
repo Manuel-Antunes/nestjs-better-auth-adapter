@@ -32,11 +32,12 @@ export type BetterAuthPluginId<A extends BetterAuthPluginHost> =
 
 /**
  * The plugin of `A` whose id is `Id`, with its own type (its `options`…)
- * when `A`'s type lists it; else Better Auth's `BetterAuthPlugin`.
+ * when `A`'s type lists it; else Better Auth's `BetterAuthPlugin`, as the
+ * plugin is one of those `A`'s type doesn't tell (`plugins: BetterAuthPlugin[]`).
  */
 export type BetterAuthPluginById<
 	A extends BetterAuthPluginHost,
 	Id extends string,
 > = [Extract<BetterAuthPluginOf<A>, { id: Id }>] extends [never]
-	? BetterAuthPluginOf<A>
+	? BetterAuthPlugin
 	: Extract<BetterAuthPluginOf<A>, { id: Id }>;
