@@ -17,7 +17,13 @@ export type {
 } from "./interfaces/access-control.interface.ts";
 export type * from "./interfaces/better-auth-module-options.interface.ts";
 export type * from "./interfaces/better-auth-module-root-options.interface.ts";
-export type { BetterAuthApiKey } from "./interfaces/better-auth-plugin.interface.ts";
+export type {
+	BetterAuthApiKey,
+	BetterAuthPluginById,
+	BetterAuthPluginHost,
+	BetterAuthPluginId,
+	BetterAuthPluginOf,
+} from "./interfaces/better-auth-plugin.interface.ts";
 export type * from "./interfaces/better-auth-providers.interface.ts";
 export type * from "./interfaces/better-auth-service.interface.ts";
 export type * from "./interfaces/better-auth-session.interface.ts";

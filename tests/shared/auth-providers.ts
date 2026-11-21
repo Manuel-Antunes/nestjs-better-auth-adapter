@@ -5,6 +5,7 @@ import {
 	BetterAuthJwtProvider,
 	BetterAuthSessionProvider,
 } from "../../src/index.ts";
+import type { BetterAuthPluginHost } from "../../src/index.ts";
 import { hasPlugin } from "../../src/plugins.ts";
 
 /** The app's session provider, as the README shows it. */
@@ -44,7 +45,7 @@ export class ApiKeyAuth extends BetterAuthApiKeyProvider {
  * The providers a test app registers unless it names its own: the session
  * provider, and those whose plugin `auth` has.
  */
-export function defaultAuthProviders(auth: object) {
+export function defaultAuthProviders(auth: BetterAuthPluginHost) {
 	return [
 		SessionAuth,
 		...(hasPlugin(auth, "jwt") ? [JwtAuth] : []),

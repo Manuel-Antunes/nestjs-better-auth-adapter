@@ -1,7 +1,14 @@
+import type { Auth as BetterAuth, BetterAuthOptions } from "better-auth";
 import type { BetterAuthBodyParserOptions } from "./body-parser-options.interface.ts";
 
-// biome-ignore lint/suspicious/noExplicitAny: Better Auth's instance type depends on its options and plugins
-export type Auth = any;
+/**
+ * A `betterAuth({...})` instance: `Auth<typeof options>` for one built with
+ * those options. `Auth` alone takes any instance: Better Auth's type is
+ * invariant in its options (`$context.adapter` uses them both ways), so
+ * `Auth<BetterAuthOptions>` would refuse every concrete one.
+ */
+// biome-ignore lint/suspicious/noExplicitAny: the options of whichever instance the app built
+export type Auth<Options extends BetterAuthOptions = any> = BetterAuth<Options>;
 
 export type BetterAuthMiddleware = (
 	// biome-ignore lint/suspicious/noExplicitAny: the request type depends on the HTTP adapter
