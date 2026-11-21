@@ -415,6 +415,15 @@ export class PostsController {
   - Elsewhere, an access token gets a 403 (`access_token_not_accepted`): a token a user granted another app never stands for their whole session.
   - A missing scope gets a 403 with RFC 6750's `insufficient_scope` challenge naming it.
   - The session, `jwt()` JWTs and API keys work as before on these routes.
+  - A scope the plugin doesn't issue (its `scopes`, or their defaults) fails at startup, naming the class and the method: no token could carry it, so a typo (`read:posts` for `read:post`) would otherwise only show as 403s.
+  - `OAuthScopes` is also the key `Reflector` reads the scopes by, for a guard of your own where `AuthenticationGuard` doesn't run, or a test holding the declarations against something else. A method's scopes replace its class's, as for the provider:
+
+    ```ts
+    const scopes = reflector.getAllAndOverride<readonly string[] | undefined>(OAuthScopes, [
+      context.getHandler(),
+      context.getClass(),
+    ]);
+    ```
 - **The user.** `@CurrentUser()` is the user who granted the token. `client_credentials` tokens have no user and get a 403 (`user_required`), unless your provider admits them ([below](#admitting-client_credentials-tokens)).
 - **Revocation.** As with introspection, a token stops working once the session it was granted from ends (sign-out, revoked session). `checkSession: false` skips that lookup, and tokens then pass until they expire.
 - **Discovery for clients.** 401s point clients to `/.well-known/oauth-protected-resource/api` (RFC 9728), and MCP clients find the authorization server through it. Each provider builds its document at startup and hands it to `BetterAuthOAuthProviderModule`, which serves it to any origin, one per `audience`. A provider fails at startup without the module.

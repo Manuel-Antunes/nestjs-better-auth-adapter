@@ -5,13 +5,14 @@ import {
 	Module,
 	type NestModule,
 } from "@nestjs/common";
-import { HttpAdapterHost } from "@nestjs/core";
+import { DiscoveryModule, HttpAdapterHost } from "@nestjs/core";
 import {
 	getNodeRequest,
 	getNodeResponse,
 	getRequestPath,
 } from "../http/middlewares.ts";
 import { OAuthResourceDocuments } from "./oauth-resource-documents.ts";
+import { OAuthScopesCheck } from "./oauth-scopes.check.ts";
 
 /**
  * This API as a resource server of Better Auth's `oauthProvider()`: import
@@ -22,6 +23,9 @@ import { OAuthResourceDocuments } from "./oauth-resource-documents.ts";
  * `WWW-Authenticate` challenges of its 401s point clients to, to any
  * origin. Better Auth's own discovery documents (an authorization server's)
  * stay `BetterAuthModule`'s, as all of Better Auth's routes.
+ *
+ * At startup, it fails on an `@OAuthScopes()` naming a scope that
+ * `oauthProvider()` doesn't issue.
  *
  * @example
  * ```ts
@@ -38,7 +42,8 @@ import { OAuthResourceDocuments } from "./oauth-resource-documents.ts";
  */
 @Global()
 @Module({
-	providers: [OAuthResourceDocuments],
+	imports: [DiscoveryModule],
+	providers: [OAuthResourceDocuments, OAuthScopesCheck],
 	exports: [OAuthResourceDocuments],
 })
 export class BetterAuthOAuthProviderModule implements NestModule {

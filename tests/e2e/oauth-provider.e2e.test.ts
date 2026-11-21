@@ -19,6 +19,7 @@ import {
 	CurrentUser,
 	type JwtClaims,
 } from "@nestjs/authentication";
+import { Reflector } from "@nestjs/core";
 import { admin } from "better-auth/plugins/admin";
 import { jwt } from "better-auth/plugins/jwt";
 import request from "supertest";
@@ -859,5 +860,121 @@ describe("BetterAuthOAuthProvider settings", () => {
 				controllers: [],
 			}),
 		).rejects.toThrow(/unknown/i);
+	});
+
+	describe("the scopes @OAuthScopes() declares", () => {
+		@OAuthScopes("read:posts")
+		@Controller("typo")
+		class TypoController {
+			@Get()
+			list() {}
+
+			@OAuthScopes("read:post", "write:post")
+			@Get("write")
+			write() {}
+		}
+
+		@Injectable()
+		class TypoResolver {
+			@OAuthScopes("openid", "read:comment")
+			comments() {}
+		}
+
+		it("fail at startup when oauthProvider() doesn't issue them, naming where", async () => {
+			const startup = createTestApp({
+				auth: createAuth(),
+				imports: [BetterAuthOAuthProviderModule],
+				providers: [oauthAuth({ audience: API }), TypoResolver],
+				controllers: [TypoController],
+			});
+			await expect(startup).rejects.toThrow(
+				"@OAuthScopes() names scopes oauthProvider() doesn't issue, which no access token could carry: TypoController ('read:posts'), TypoController.write ('write:post'), TypoResolver.comments ('read:comment').",
+			);
+			await expect(startup).rejects.toThrow(
+				"which issues 'openid', 'profile', 'email', 'offline_access', 'read:post'",
+			);
+		});
+
+		it("are checked against oauthProvider()'s default scopes when it sets none", async () => {
+			@Controller("profile")
+			class ProfileController {
+				@OAuthScopes("openid", "profile")
+				@Get()
+				show() {}
+			}
+
+			const auth = () =>
+				createTestAuth({
+					baseURL: ORIGIN,
+					plugins: [
+						jwt({ jwt: { issuer: ISSUER, audience: API } }),
+						oauthProvider({ loginPage: "/sign-in", consentPage: "/consent" }),
+					],
+				});
+			const { app } = await createTestApp({
+				auth: auth(),
+				imports: [BetterAuthOAuthProviderModule],
+				providers: [oauthAuth({ audience: API })],
+				controllers: [ProfileController],
+			});
+			await app.close();
+
+			await expect(
+				createTestApp({
+					auth: auth(),
+					imports: [BetterAuthOAuthProviderModule],
+					providers: [oauthAuth({ audience: API })],
+					controllers: [TypoController],
+				}),
+			).rejects.toThrow(/TypoController \('read:posts'\)/);
+		});
+	});
+});
+
+describe("@OAuthScopes() as Reflector's key", () => {
+	@OAuthScopes("read:post")
+	class PostsController {
+		list() {}
+
+		@OAuthScopes("write:post")
+		write() {}
+	}
+
+	const reflector = new Reflector();
+	const scopesOf = (method: keyof PostsController) =>
+		reflector.getAllAndOverride<readonly string[] | undefined>(OAuthScopes, [
+			PostsController.prototype[method],
+			PostsController,
+		]);
+
+	it("reads the scopes a class or a method declares", () => {
+		expect(reflector.get(OAuthScopes, PostsController)).toEqual(["read:post"]);
+		expect(reflector.get(OAuthScopes, PostsController.prototype.write)).toEqual(
+			["write:post"],
+		);
+	});
+
+	it("applies the provider's rule: a method's scopes replace its class's", () => {
+		expect(scopesOf("list")).toEqual(["read:post"]);
+		expect(scopesOf("write")).toEqual(["write:post"]);
+	});
+
+	it("hands out the declaration itself, frozen", () => {
+		expect(Object.isFrozen(scopesOf("list"))).toBe(true);
+	});
+
+	it("keeps the metadata key readers of earlier versions used", () => {
+		expect(OAuthScopes.KEY).toBe(
+			Symbol.for("nestjs-better-auth-adapter:oauth-scopes"),
+		);
+		expect(Reflect.getMetadata(OAuthScopes.KEY, PostsController)).toEqual([
+			"read:post",
+		]);
+	});
+
+	it("refuses a scope RFC 6749 doesn't allow", () => {
+		expect(() => OAuthScopes("read post")).toThrow(
+			'@OAuthScopes(): "read post" is not a valid OAuth scope.',
+		);
 	});
 });
