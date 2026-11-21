@@ -26,8 +26,8 @@ export interface BetterAuthModuleOptions<A = Auth> {
 	 * `oauthProvider()`'s discovery documents from this app. `false` for an
 	 * app that holds the instance only to authenticate its callers, when
 	 * another service serves them: nothing is mounted, Nest's own body parser
-	 * stays in charge (leave it on), and `trustedOriginsCors`, `bodyParser`
-	 * and `middleware` don't apply. Providers, hooks, handlers and
+	 * stays in charge (leave it on), and `trustedOriginsCors`, `bodyParser`,
+	 * `middleware` and `jwksCacheControl` don't apply. Providers, hooks, handlers and
 	 * `BetterAuthService` work the same.
 	 * @default true
 	 */
@@ -38,6 +38,17 @@ export interface BetterAuthModuleOptions<A = Auth> {
 	 * @default true
 	 */
 	trustedOriginsCors?: boolean;
+	/**
+	 * The `Cache-Control` of the `jwt()` plugin's JWKS, which Better Auth
+	 * sends without one: the document every resource server fetches before
+	 * it accepts a token, so a CDN can serve it while the issuer is cold or
+	 * down. Sent only with a 200 that has none of its own, so Better Auth's
+	 * wins if it ever sends one. A string replaces the policy (e.g.
+	 * `'public, max-age=300, stale-while-revalidate=86400, stale-if-error=86400'`
+	 * behind a CDN); `false` sends none.
+	 * @default `oauthProvider()`'s policy for its discovery documents: 'public, max-age=15, stale-while-revalidate=15, stale-if-error=86400'
+	 */
+	jwksCacheControl?: string | false;
 	bodyParser?: BetterAuthBodyParserOptions;
 	/** Wraps Better Auth's handler, e.g. for request-scoped contexts like MikroORM's `RequestContext`. */
 	middleware?: BetterAuthMiddleware;
