@@ -31,7 +31,7 @@ import type {
 	OAuthResourceIdentifier,
 	OAuthResourceSettings,
 } from "./interfaces/oauth-resource.interface.ts";
-import { OAUTH_SCOPES } from "./oauth-scopes.decorator.ts";
+import { OAuthScopes } from "./oauth-scopes.decorator.ts";
 import { OAuthResourceDocuments } from "./oauth-resource-documents.ts";
 import {
 	assertOAuthResourceServer,
@@ -155,10 +155,9 @@ export abstract class BetterAuthOAuthProvider<
 		if (!dpop && !(/^bearer$/i.test(scheme) && isOAuthAccessToken(token)))
 			return null;
 
-		const scopes = this.reflector.getAllAndOverride<string[] | undefined>(
-			OAUTH_SCOPES,
-			[context.getHandler(), context.getClass()],
-		);
+		const scopes = this.reflector.getAllAndOverride<
+			readonly string[] | undefined
+		>(OAuthScopes, [context.getHandler(), context.getClass()]);
 
 		const target = await this.target(context);
 		const resource = this.resourceFor(context);

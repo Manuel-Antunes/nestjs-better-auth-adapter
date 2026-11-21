@@ -3,4 +3,5 @@ export { BetterAuthOAuthProviderModule } from "./better-auth-oauth-provider.modu
 export * from "./errors/index.ts";
 export type * from "./interfaces/better-auth-oauth-provider-options.interface.ts";
 export type * from "./interfaces/oauth-access-token.interface.ts";
+export type * from "./interfaces/oauth-scopes-decorator.interface.ts";
 export { OAuthScopes } from "./oauth-scopes.decorator.ts";

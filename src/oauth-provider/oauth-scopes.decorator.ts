@@ -1,9 +1,9 @@
 import { SetMetadata } from "@nestjs/common";
 import { BetterAuthConfigurationError } from "../errors/better-auth-configuration.error.ts";
+import type { OAuthScopesDecorator } from "./interfaces/oauth-scopes-decorator.interface.ts";
 
-export const OAUTH_SCOPES = Symbol.for(
-	"nestjs-better-auth-adapter:oauth-scopes",
-);
+/** Where `@OAuthScopes()` keeps its scopes: `OAuthScopes.KEY`. */
+const OAUTH_SCOPES = Symbol.for("nestjs-better-auth-adapter:oauth-scopes");
 
 /** A scope token, as RFC 6749 §3.3 allows them. */
 const SCOPE_TOKEN = /^[\x21\x23-\x5b\x5d-\x7e]+$/;
@@ -20,6 +20,11 @@ const SCOPE_TOKEN = /^[\x21\x23-\x5b\x5d-\x7e]+$/;
  * credentials (the session, `jwt()` JWTs, API keys) are not affected.
  * A method's `@OAuthScopes()` replaces its controller's.
  *
+ * `BetterAuthOAuthProviderModule` fails at startup on a scope that
+ * `oauthProvider({ scopes })` doesn't list, as no token could carry it.
+ * `OAuthScopes` is also the key `Reflector` reads the scopes by:
+ * `reflector.getAllAndOverride<readonly string[] | undefined>(OAuthScopes, [handler, controller])`.
+ *
  * @example
  * ```ts
  * @OAuthScopes('read:post')
@@ -27,14 +32,16 @@ const SCOPE_TOKEN = /^[\x21\x23-\x5b\x5d-\x7e]+$/;
  * list(@CurrentUser() user: User) {}
  * ```
  */
-export function OAuthScopes(
-	...scopes: string[]
-): ClassDecorator & MethodDecorator {
-	for (const scope of scopes) {
-		if (!SCOPE_TOKEN.test(scope))
-			throw new BetterAuthConfigurationError(
-				`@OAuthScopes(): ${JSON.stringify(scope)} is not a valid OAuth scope.`,
-			);
-	}
-	return SetMetadata(OAUTH_SCOPES, scopes);
-}
+export const OAuthScopes: OAuthScopesDecorator = Object.assign(
+	(...scopes: string[]): ClassDecorator & MethodDecorator => {
+		for (const scope of scopes) {
+			if (typeof scope !== "string" || !SCOPE_TOKEN.test(scope))
+				throw new BetterAuthConfigurationError(
+					`@OAuthScopes(): ${JSON.stringify(scope)} is not a valid OAuth scope.`,
+				);
+		}
+		// Frozen: whoever reads them gets the declaration, not a copy to edit.
+		return SetMetadata(OAUTH_SCOPES, Object.freeze([...scopes]));
+	},
+	{ KEY: OAUTH_SCOPES },
+);
