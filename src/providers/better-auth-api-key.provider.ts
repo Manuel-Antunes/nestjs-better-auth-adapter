@@ -13,7 +13,7 @@ import { BetterAuthService } from "../better-auth.service.ts";
 import { BetterAuthApiKeyError } from "../errors/better-auth-api-key.error.ts";
 import { BetterAuthConfigurationError } from "../errors/better-auth-configuration.error.ts";
 import { OwnedByBetterAuthError } from "../errors/owned-by-better-auth.error.ts";
-import type { BetterAuthApiKey } from "../interfaces/better-auth-plugin.interface.ts";
+import type { BetterAuthApiKey } from "../interfaces/better-auth-api-key.interface.ts";
 import type { BetterAuthApiKeyProviderOptions } from "../interfaces/better-auth-providers.interface.ts";
 import type { AnyBetterAuthService } from "../interfaces/better-auth-service.interface.ts";
 import type { BetterAuthUser } from "../interfaces/better-auth-session.interface.ts";
