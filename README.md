@@ -888,7 +888,7 @@ All optional. Extend the Better Auth handler and register it in `AuthenticationR
 
 ### Email handlers
 
-`@nestjs/authentication`'s email features, with Better Auth creating and checking the tokens. Configure the feature with the page that receives the link, extend the matching Better Auth handler, implement `send()`, and register it from your constructor, as any Nest handler. Each base class takes `AuthenticationRegistry` and `BetterAuthService`, and plugs itself into Better Auth at startup (`onModuleInit`) when it is the registered handler; it puts Better Auth's own callback back when the app closes.
+`@nestjs/authentication`'s email features, with Better Auth creating and checking the tokens. Configure the feature with where the link goes (Better Auth's own endpoint, or a page of yours: [below](#migrating-from-better-auths-callbacks)), extend the matching Better Auth handler, implement `send()`, and register it from your constructor, as any Nest handler. Each base class takes `AuthenticationRegistry` and `BetterAuthService`, and plugs itself into Better Auth at startup (`onModuleInit`) when it is the registered handler; it puts Better Auth's own callback back when the app closes.
 
 ```ts
 AuthenticationModule.forRoot({
@@ -905,13 +905,13 @@ export class ResetMailer extends BetterAuthPasswordResetHandler {
     registry.registerHandler("passwordReset", this);
   }
 
-  send({ email, url, expiresAt }: PasswordResetLink) {
-    return this.mailer.send(email, "Reset your password", url);
+  send({ user, url }: BetterAuthPasswordResetLink) {
+    return this.mailer.send(user.email, `${user.name}, reset your password`, url);
   }
 }
 ```
 
-Better Auth's callback sends through the handler registered for the feature, asked at each call. The link is the feature's `url` with Better Auth's token in `?token=`, plus the query Better Auth put on its own link (`callbackURL`…). The page hands the token to Better Auth:
+Better Auth's callback sends through the handler registered for the feature, asked at each call. The link is the feature's `url` with Better Auth's token in `?token=`, plus the query Better Auth put on its own link (`callbackURL`…). A page of yours hands the token to Better Auth:
 
 | Base class | Feature (`url`) | Replaces | The page calls | Requires in the Better Auth config |
 | --- | --- | --- | --- | --- |
@@ -919,11 +919,31 @@ Better Auth's callback sends through the handler registered for the feature, ask
 | `BetterAuthEmailVerificationHandler` | `emailVerification` | `emailVerification.sendVerificationEmail` | `GET {basePath}/verify-email?token=…` (`authClient.verifyEmail`) | `emailVerification: {}` |
 | `BetterAuthMagicLinkHandler` | `magicLink` | `magicLink({ sendMagicLink })` | `GET {basePath}/magic-link/verify?token=…` (`authClient.magicLink.verify`) | `magicLink({ sendMagicLink: fromNestHandler })` |
 
+- **What Better Auth gave its callback.** `send()` gets it on the link, besides Nest's fields (`email`, `url`, `expiresAt`):
+
+  | Link | Fields |
+  | --- | --- |
+  | `BetterAuthPasswordResetLink`, `BetterAuthEmailVerificationLink` | `user` (whole, with your additional fields: no lookup to address the mail by name), `token`, `request` |
+  | `BetterAuthMagicLink` | `token`, `metadata` (the client's `signIn.magicLink({ metadata })`), `request`, `context` (the plugin's endpoint context, `sendMagicLink`'s second argument) |
+
+  `request` is the request that asked for the link, none when the app called `auth.api` without one. `token` is also in `url`, and it signs the user in (or resets their password) while it's valid: to key records by it, store a hash of it. A handler typed with Nest's own link types keeps working.
 - **What Better Auth decides.** How long a link lasts is Better Auth's config (`resetPasswordTokenExpiresIn`, `emailVerification.expiresIn`, `magicLink({ expiresIn })`): the features' `ttl`, and `magicLink`'s `bindToBrowser` and `cookie`, fail at startup rather than be ignored.
 - **Nest's own flows are refused.** Better Auth finds the accounts, stores the passwords and verifies the addresses: the rest of Nest's contract (`findUser()`, `updatePassword()`, `markVerified()`, `resolveUser()`) throws, and so does `PasswordResetService`, `EmailVerificationService` or `MagicLinkService` if something calls them. `isVerified()` keeps Nest's default, Better Auth's `user.emailVerified`, for `@Authenticate({ verifiedEmail: true })`.
 - **Stores.** These features name stores (`sessions`, `emailTokens`, `magicLinks`) Nest requires in production. `BetterAuthModule` registers them with `AuthenticationStorage`, for the configured features only, refusing every call: Better Auth keeps the sessions and the links, so no in-memory copy runs on the side. `sessions` is left to you when Nest's own `session` feature is on.
 - **Swapping a handler.** A wrapper or a test double extending the same base class takes over with `registry.registerHandler("passwordReset", this, { replace: true })`, from its constructor (the registry locks once the app has initialized): the registered one plugs itself in. A plain Nest handler registered for these features fails at startup, as Better Auth would never call it.
 - `fromNestHandler` (from `nestjs-better-auth-adapter/plugin`) fills a callback Better Auth's types require; startup fails without a registered handler to replace it. A handler replaces a callback the config defines, and says so in the logs.
+
+#### Migrating from Better Auth's callbacks
+
+Moving a callback to a handler doesn't change the links in your emails, nor need new pages, for two of the three features: point `url` at Better Auth's own endpoint, and the link is the one Better Auth would have sent (its query, `callbackURL` and the others, rides along).
+
+| Feature | `url` | Link sent |
+| --- | --- | --- |
+| `emailVerification` | `https://example.com/api/auth/verify-email` | `/api/auth/verify-email?callbackURL=…&token=…`: Better Auth verifies the address and redirects, as before |
+| `magicLink` | `https://example.com/api/auth/magic-link/verify` | `/api/auth/magic-link/verify?callbackURL=…&token=…`: Better Auth signs the user in and redirects, as before |
+| `passwordReset` | your reset page | Better Auth's own link has the token in its path (`/reset-password/:token`), which `?token=` can't reproduce: the page reads `?token=` and posts it with the new password to `/reset-password` (`authClient.resetPassword`, as better-auth-ui's reset view does) |
+
+What the callback did besides sending the mail moves to `send()` too: it gets the same data, on the link ([above](#email-handlers)).
 
 ### `OidcAccountResolver`
 

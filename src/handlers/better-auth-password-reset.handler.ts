@@ -5,6 +5,7 @@ import {
 } from "@nestjs/authentication";
 import { authenticationOptionsOf } from "../better-auth.service.ts";
 import type { AnyBetterAuthService } from "../interfaces/better-auth-service.interface.ts";
+import type { BetterAuthPasswordResetLink } from "../interfaces/handler-links.interface.ts";
 import type { ConfigObject } from "../interfaces/handlers.interface.ts";
 import {
 	configSection,
@@ -20,8 +21,15 @@ import { OwnedByBetterAuthError } from "../errors/owned-by-better-auth.error.ts"
  * handler. Once registered as `passwordReset`, it plugs itself into Better
  * Auth's `emailAndPassword.sendResetPassword` at startup, which then sends
  * through the handler the registry holds: a link to the `passwordReset.url`
- * page of the `AuthenticationModule` options, `?token=…`. That page posts
- * the token and the new password to Better Auth (`POST /reset-password`).
+ * page of the `AuthenticationModule` options, `?token=…`, with the query
+ * Better Auth put on its own (`callbackURL`). That page posts the token and
+ * the new password to Better Auth (`POST /reset-password`): unlike the
+ * other links, Better Auth's own has the token in its path
+ * (`/reset-password/:token`), which `?token=` can't reproduce.
+ *
+ * `send()` gets what Better Auth gave its `sendResetPassword` callback, on
+ * the link: the whole `user` (to address the mail by name without a
+ * lookup), the `token` and the `request`.
  *
  * Better Auth finds the account and stores the new password: the rest of
  * Nest's contract (`findUser()`, `updatePassword()`) throws.
@@ -35,7 +43,7 @@ import { OwnedByBetterAuthError } from "../errors/owned-by-better-auth.error.ts"
  *     registry.registerHandler("passwordReset", this);
  *   }
  *
- *   send({ email, url }: PasswordResetLink) {
+ *   send({ email, url }: BetterAuthPasswordResetLink) {
  *     return this.mailer.send(email, "Reset your password", url);
  *   }
  * }
@@ -74,15 +82,28 @@ export abstract class BetterAuthPasswordResetHandler
 		this.#restore = replaceCallback(
 			parent,
 			"emailAndPassword.sendResetPassword",
-			(async ({ user, url, token }: ConfigObject) =>
-				this.#registry.handler("passwordReset")?.send({
+			(async ({ user, url, token }: ConfigObject, request?: Request) =>
+				// BetterAuthHandlersCheck refuses any other registered handler.
+				(
+					this.#registry.handler("passwordReset") as
+						| BetterAuthPasswordResetHandler
+						| undefined
+				)?.send({
 					userId: user.id,
 					email: user.email,
 					url: pageLink(page, token, url),
 					expiresAt: expiresIn(parent.resetPasswordTokenExpiresIn ?? 3600),
+					user,
+					token,
+					request,
 				})) as never,
 		);
 	}
+
+	/** Sends `link` to `link.email`, with what Better Auth gave its callback. */
+	abstract override send(
+		link: BetterAuthPasswordResetLink,
+	): void | Promise<void>;
 
 	/** Puts Better Auth's own callback back. */
 	onModuleDestroy(): void {
