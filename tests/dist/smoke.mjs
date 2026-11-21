@@ -102,12 +102,15 @@ try {
 	for (const name of [
 		"BetterAuthOAuthProvider",
 		"BetterAuthOAuthProviderModule",
-		"OAuthScopes",
 		"OAuthAccessTokenError",
 	]) {
 		assert.equal(typeof oauthProvider[name], "function", name);
 		assert.equal(name in core, false, `${name} is in the core entrypoint`);
 	}
+	assert.equal(typeof oauthProvider.OAuthScopes.require, "function");
+	assert.equal(typeof oauthProvider.OAuthScopes.any, "function");
+	assert.equal(typeof oauthProvider.OAuthScopes.KEY, "symbol");
+	assert.equal("OAuthScopes" in core, false, "OAuthScopes is in the core entrypoint");
 
 	console.log("dist smoke test passed");
 } finally {

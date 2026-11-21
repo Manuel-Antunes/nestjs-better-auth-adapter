@@ -50,7 +50,7 @@ class ScopesService {
 class ProbeController {
 	constructor(private readonly scopes: ScopesService) {}
 
-	@OAuthScopes("read:post")
+	@OAuthScopes.require("read:post")
 	@Get("granted")
 	async granted() {
 		return { scopes: await this.scopes.granted() };

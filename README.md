@@ -174,7 +174,7 @@ Extend these base classes and register your subclasses with `registry.registerPr
 | `BetterAuthSessionProvider` | Session cookie; `Authorization: Bearer <session token>` with `bearer()` | Better Auth's session | | |
 | `BetterAuthJwtProvider` | `Authorization: Bearer <jwt>` from `jwt()` (`/token`, `set-auth-jwt`), checked against its JWKS; socket.io's `handshake.auth.token` | The JWT claims | `{ realm?: 'api' }` | `jwt()`, and a `baseURL` |
 | `BetterAuthApiKeyProvider` | `x-api-key`, or the `headers` you pass | `{ method: 'api-key', keyId, expiresAt? }` | `{ realm?: 'api', headers?: 'x-api-key' }` | `apiKey()` |
-| `BetterAuthOAuthProvider` (from `/oauth-provider`) | `Authorization: Bearer` or `DPoP` access tokens from `oauthProvider()`, on routes with `@OAuthScopes()` | The token's claims (`BetterAuthOAuthAccessToken`) | `{ audience, resourceMetadata?, checkSession?, dpopReplayStore? }` ([below](#oauth-21-and-openid-connect-provider)) | `oauthProvider()`, `BetterAuthOAuthProviderModule` |
+| `BetterAuthOAuthProvider` (from `/oauth-provider`) | `Authorization: Bearer` or `DPoP` access tokens from `oauthProvider()`, on routes with `@OAuthScopes.require()` or `.any()` | The token's claims (`BetterAuthOAuthAccessToken`) | `{ audience, resourceMetadata?, checkSession?, dpopReplayStore? }` ([below](#oauth-21-and-openid-connect-provider)) | `oauthProvider()`, `BetterAuthOAuthProviderModule` |
 
 ```ts
 @Injectable()
@@ -286,8 +286,8 @@ Every error this package throws is a class of its own, exported for exception fi
 | `BetterAuthSessionError` | 401 `invalid_session` | A session a subclass's `validate()` refused |
 | `BetterAuthBannedUserError` | 403 `banned_user` | A user the `admin()` plugin banned, with any credential |
 | `OAuthAccessTokenError` | 401 (`invalid_token` by default) | An OAuth access token that didn't verify, or whose user or session is gone |
-| `OAuthInsufficientScopeError` | 403 `insufficient_scope` | An access token missing scopes of `@OAuthScopes()` (`scopes` lists them) |
-| `OAuthAccessTokenNotAcceptedError` | 403 `access_token_not_accepted` | An access token on a route without `@OAuthScopes()` |
+| `OAuthInsufficientScopeError` | 403 `insufficient_scope` | An access token missing scopes of `@OAuthScopes.require()` (`scopes` lists them) |
+| `OAuthAccessTokenNotAcceptedError` | 403 `access_token_not_accepted` | An access token on a route without `@OAuthScopes.require()` or `.any()` |
 | `OAuthUserRequiredError` | 403 `user_required` | A `client_credentials` access token |
 | `OwnedByBetterAuthError` | | A call to a store or handler step of Nest's own flows that Better Auth replaces |
 | `BetterAuthConfigurationError` | | A configuration that can't work, at startup |
@@ -389,7 +389,7 @@ export const auth = betterAuth({
 
 1. Import `BetterAuthOAuthProviderModule` once, next to `BetterAuthModule`. It's global, like `BetterAuthModule`.
 2. Extend `BetterAuthOAuthProvider` with your API's resource identifier as `audience`, and register it.
-3. Mark the routes that take access tokens with `@OAuthScopes()`.
+3. Mark the routes that take access tokens with `@OAuthScopes.require(...scopes)`, or `@OAuthScopes.any()`.
 
 ```ts
 import { BetterAuthOAuthProviderModule } from "nestjs-better-auth-adapter/oauth-provider";
@@ -425,7 +425,7 @@ import { type BetterAuthOAuthAccessToken, OAuthScopes } from "nestjs-better-auth
 
 @Controller("api/posts")
 export class PostsController {
-  @OAuthScopes("read:post")
+  @OAuthScopes.require("read:post")
   @Get()
   list(@CurrentUser() user: User, @CurrentSession() token: BetterAuthOAuthAccessToken) {
     // token.azp is the app the user granted access to; token.scopes, what for
@@ -439,12 +439,14 @@ export class PostsController {
   - the RFC 9068 type (`at+jwt`);
   - for sender-constrained tokens (`Authorization: DPoP`), the DPoP proof, each recorded once in Better Auth's storage so every instance sees it.
 - **Which tokens.** Clients get JWT access tokens by requesting the `resource`. Without one, the plugin issues opaque tokens meant for its `userinfo` endpoint, which the API refuses.
-- **Scopes.** A route accepts access tokens only with `@OAuthScopes()`, and only when they carry every scope it lists. `@OAuthScopes()` with no scope accepts any token issued for this API.
+- **Scopes.** A route, or a controller, says whether it accepts access tokens:
+  - `@OAuthScopes.require("read:post", ...)`: tokens carrying every one of these scopes;
+  - `@OAuthScopes.any()`: any token issued for this API, with no scope required (a route that checks its scopes another way: a field resolver under a root operation that required them, an agent's handler that answers with its own protocol's error).
   - Elsewhere, an access token gets a 403 (`access_token_not_accepted`): a token a user granted another app never stands for their whole session.
   - A missing scope gets a 403 with RFC 6750's `insufficient_scope` challenge naming it.
   - The session, `jwt()` JWTs and API keys work as before on these routes.
   - A scope the plugin doesn't issue (its `scopes`, or their defaults) fails at startup, naming the class and the method: no token could carry it, so a typo (`read:posts` for `read:post`) would otherwise only show as 403s.
-  - `OAuthScopes` is also the key `Reflector` reads the scopes by, for a guard of your own where `AuthenticationGuard` doesn't run, or a test holding the declarations against something else. A method's scopes replace its class's, as for the provider:
+  - `OAuthScopes` is also the key `Reflector` reads the scopes by, for a guard of your own where `AuthenticationGuard` doesn't run, or a test holding the declarations against something else. A method's scopes replace its class's, as for the provider, and `any()` reads as `[]`:
 
     ```ts
     const scopes = reflector.getAllAndOverride<readonly string[] | undefined>(OAuthScopes, [
@@ -452,6 +454,16 @@ export class PostsController {
       context.getClass(),
     ]);
     ```
+
+  - `scopesFor(context)`, a protected method of `BetterAuthOAuthProvider`, reads them, and returns `undefined` to refuse access tokens. Override it for a rule of your own: a default for a whole module, one per transport. An app that accepts access tokens wherever nothing was declared says so once, and writes `@OAuthScopes.require()` only where a scope is required:
+
+    ```ts
+    protected override scopesFor(context: ExecutionContext) {
+      return super.scopesFor(context) ?? [];
+    }
+    ```
+
+    This gives up the guarantee above: a token a user granted another app then passes every route that forgot its `require()`.
 - **The user.** `@CurrentUser()` is the user who granted the token. `client_credentials` tokens have no user and get a 403 (`user_required`), unless your provider admits them ([below](#admitting-client_credentials-tokens)).
 - **Revocation.** As with introspection, a token stops working once the session it was granted from ends (sign-out, revoked session). `checkSession: false` skips that lookup, and tokens then pass until they expire.
 - **Discovery for clients.** 401s point clients to `/.well-known/oauth-protected-resource/api` (RFC 9728), and MCP clients find the authorization server through it. Each provider builds its document at startup and hands it to `BetterAuthOAuthProviderModule`, which serves it to any origin, one per `audience`. A provider fails at startup without the module.
@@ -484,7 +496,7 @@ export class MachineAuth extends BetterAuthOAuthProvider<ApiClient> {
 ```
 
 ```ts
-@OAuthScopes("sync:orders")
+@OAuthScopes.require("sync:orders")
 @Post("orders/sync")
 sync(@CurrentUser() caller: User | ApiClient, @CurrentSession() token: BetterAuthOAuthAccessToken) {
   if ("kind" in caller) {
@@ -493,7 +505,7 @@ sync(@CurrentUser() caller: User | ApiClient, @CurrentSession() token: BetterAut
 }
 ```
 
-- `@OAuthScopes()` still applies: a client's token passes only with the route's scopes, those in the client's `client_credentials_scopes`.
+- `@OAuthScopes.require()` still applies: a client's token passes only with the route's scopes, those in the client's `client_credentials_scopes`.
 - A client is not a user. Give the principal a discriminant (`kind` above), and in the policies of routes that admit clients, check it before reading user fields, and before the [access control policies](#policies-backed-by-better-auths-access-control)' helpers, which take a Better Auth user.
 - Bans still apply to every token a user granted, whatever principal `validate()` builds for them. A principal without the user's `banned` field costs a second lookup to check it; keep `super.validate()`'s fields (`{ ...user, kind: "user" }`) to avoid it.
 - A subclass that doesn't override `validate()` keeps refusing them with `user_required`. To admit them on some routes only, register the subclass after the one that refuses them, and pick it with `@Authenticate({ providers: [MachineAuth] })` on those routes, with `resourceMetadata: false` if both have the same `audience`.
@@ -1270,7 +1282,7 @@ Guests are denied, and Nest answers `401` for them; a signed-in user without the
 | `YogaDriver`, `YogaFederationDriver` (`@graphql-yoga/nestjs`) | Nothing: Yoga's context is `{ req, res }` on Express, `{ req, reply }` on Fastify |
 
   Build Apollo's context per request: Nest refuses an object at startup. Without the response in it, requests still authenticate, but the cookies `getSession()` refreshes (sliding expiry, the cookie cache) never reach the browser.
-- **Subscriptions over SSE** (Yoga's, on the GraphQL endpoint) are authenticated like queries, by the session cookie, a `Bearer` token or an OAuth access token on a subscription with `@OAuthScopes()`. A subscription refused before its first event has errors and no `data`, which Yoga answers with a 500, unless the error carries `extensions.http.status`. A GraphQL exception filter can give it Nest's status, a 401 or a 403. Refused queries then get it too, instead of a 200:
+- **Subscriptions over SSE** (Yoga's, on the GraphQL endpoint) are authenticated like queries, by the session cookie, a `Bearer` token or an OAuth access token on a subscription with `@OAuthScopes.require()` or `.any()`. A subscription refused before its first event has errors and no `data`, which Yoga answers with a 500, unless the error carries `extensions.http.status`. A GraphQL exception filter can give it Nest's status, a 401 or a 403. Refused queries then get it too, instead of a 200:
 
 ```ts
 import { Catch, HttpException } from "@nestjs/common";

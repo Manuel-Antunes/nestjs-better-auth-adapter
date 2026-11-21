@@ -5,6 +5,7 @@ import {
 	Catch,
 	Controller,
 	type ExceptionFilter,
+	type ExecutionContext,
 	Get,
 	type HttpException,
 	Inject,
@@ -106,10 +107,25 @@ class BothAudiencesAuth extends BetterAuthOAuthProvider {
 	}
 }
 
+/** Accepts access tokens where nothing was declared, in its own `scopesFor()`. */
+@Injectable()
+class OpenOAuthAuth extends BetterAuthOAuthProvider {
+	constructor(
+		@Inject(AuthenticationRegistry) registry: AuthenticationRegistry,
+	) {
+		super({ audience: API, resourceMetadata: false });
+		registry.registerProvider(this, { order: 11 });
+	}
+
+	protected override scopesFor(context: ExecutionContext) {
+		return super.scopesFor(context) ?? [];
+	}
+}
+
 @Controller("mcp")
 class McpController {
 	@Authenticate({ providers: [BothAudiencesAuth] })
-	@OAuthScopes("read:post")
+	@OAuthScopes.require("read:post")
 	@Get("posts")
 	posts(@CurrentUser("id") userId: string) {
 		return { userId };
@@ -146,7 +162,7 @@ class OAuthErrorFilter implements ExceptionFilter {
 @Controller("api")
 class ApiController {
 	@UseFilters(new OAuthErrorFilter())
-	@OAuthScopes("read:post")
+	@OAuthScopes.require("read:post")
 	@Get("filtered/posts")
 	filteredPosts() {
 		return { ok: true };
@@ -158,7 +174,7 @@ class ApiController {
 		return { ok: true };
 	}
 
-	@OAuthScopes("read:post")
+	@OAuthScopes.require("read:post")
 	@Get("posts")
 	posts(
 		@CurrentUser("id") userId: string,
@@ -167,27 +183,40 @@ class ApiController {
 		return { userId, session };
 	}
 
-	@OAuthScopes()
+	@OAuthScopes.any()
 	@Get("any-token")
 	anyToken(@CurrentUser("id") userId: string) {
 		return { userId };
 	}
 
 	@Authenticate({ providers: [MachineOAuthAuth] })
-	@OAuthScopes("read:post")
+	@OAuthScopes.require("read:post")
 	@Get("machine/posts")
 	machinePosts(@CurrentUser() caller: ClientPrincipal | AppUser) {
 		return { caller };
 	}
 
 	@Authenticate({ providers: [BothAudiencesAuth] })
-	@OAuthScopes("read:post")
+	@OAuthScopes.require("read:post")
 	@Get("both/posts")
 	bothPosts(@CurrentUser("id") userId: string) {
 		return { userId };
 	}
 
-	/** No `@OAuthScopes()`: a first-party route. */
+	@Authenticate({ providers: [OpenOAuthAuth] })
+	@Get("open/account")
+	openAccount(@CurrentUser("id") userId: string) {
+		return { userId };
+	}
+
+	@Authenticate({ providers: [OpenOAuthAuth] })
+	@OAuthScopes.require("read:post")
+	@Get("open/posts")
+	openPosts(@CurrentUser("id") userId: string) {
+		return { userId };
+	}
+
+	/** No `@OAuthScopes.require()` or `.any()`: a first-party route. */
 	@Get("account")
 	account(@CurrentUser("id") userId: string) {
 		return { userId };
@@ -235,6 +264,7 @@ describe("oauthProvider() through BetterAuthOAuthProviderModule", () => {
 				}),
 				MachineOAuthAuth,
 				BothAudiencesAuth,
+				OpenOAuthAuth,
 			],
 			controllers: [ApiController, McpController],
 		}));
@@ -329,7 +359,7 @@ describe("oauthProvider() through BetterAuthOAuthProviderModule", () => {
 			expect(any.status).toBe(200);
 		});
 
-		it("refuses them on routes without @OAuthScopes(), even when jwt() would accept them", async () => {
+		it("refuses them on routes without @OAuthScopes.require() or .any(), even when jwt() would accept them", async () => {
 			const user = await signIn();
 			const client = await createClient(user.cookie);
 			const { access_token } = await authorize(user, client, {
@@ -342,6 +372,33 @@ describe("oauthProvider() through BetterAuthOAuthProviderModule", () => {
 				.set("Authorization", `Bearer ${access_token}`);
 			expect(response.status).toBe(403);
 			expect(response.body.errorCode).toBe("access_token_not_accepted");
+		});
+
+		it("lets a subclass's scopesFor() decide: no declaration, no scope required", async () => {
+			const user = await signIn();
+			const client = await createClient(user.cookie);
+			const { access_token } = await authorize(user, client, {
+				scope: "openid",
+				resource: API,
+			});
+
+			const open = await request(server)
+				.get("/api/open/account")
+				.set("Authorization", `Bearer ${access_token}`);
+			expect(open.status).toBe(200);
+			expect(open.body.userId).toBe(user.userId);
+			// require() still applies.
+			const scoped = await request(server)
+				.get("/api/open/posts")
+				.set("Authorization", `Bearer ${access_token}`);
+			expect(scoped.status).toBe(403);
+			expect(scoped.body.errorCode).toBe("insufficient_scope");
+			// The default provider still refuses it there.
+			const refused = await request(server)
+				.get("/api/account")
+				.set("Authorization", `Bearer ${access_token}`);
+			expect(refused.status).toBe(403);
+			expect(refused.body.errorCode).toBe("access_token_not_accepted");
 		});
 
 		it("answers a missing scope with RFC 6750's insufficient_scope challenge", async () => {
@@ -671,7 +728,7 @@ describe("oauthProvider() through BetterAuthOAuthProviderModule", () => {
 			});
 		});
 
-		it("keeps the session cookie working on routes with @OAuthScopes()", async () => {
+		it("keeps the session cookie working on routes with @OAuthScopes.require()", async () => {
 			const user = await signIn();
 			const response = await request(server)
 				.get("/api/posts")
@@ -862,21 +919,21 @@ describe("BetterAuthOAuthProvider settings", () => {
 		).rejects.toThrow(/unknown/i);
 	});
 
-	describe("the scopes @OAuthScopes() declares", () => {
-		@OAuthScopes("read:posts")
+	describe("the scopes @OAuthScopes.require() declares", () => {
+		@OAuthScopes.require("read:posts")
 		@Controller("typo")
 		class TypoController {
 			@Get()
 			list() {}
 
-			@OAuthScopes("read:post", "write:post")
+			@OAuthScopes.require("read:post", "write:post")
 			@Get("write")
 			write() {}
 		}
 
 		@Injectable()
 		class TypoResolver {
-			@OAuthScopes("openid", "read:comment")
+			@OAuthScopes.require("openid", "read:comment")
 			comments() {}
 		}
 
@@ -888,7 +945,7 @@ describe("BetterAuthOAuthProvider settings", () => {
 				controllers: [TypoController],
 			});
 			await expect(startup).rejects.toThrow(
-				"@OAuthScopes() names scopes oauthProvider() doesn't issue, which no access token could carry: TypoController ('read:posts'), TypoController.write ('write:post'), TypoResolver.comments ('read:comment').",
+				"@OAuthScopes.require() names scopes oauthProvider() doesn't issue, which no access token could carry: TypoController ('read:posts'), TypoController.write ('write:post'), TypoResolver.comments ('read:comment').",
 			);
 			await expect(startup).rejects.toThrow(
 				"which issues 'openid', 'profile', 'email', 'offline_access', 'read:post'",
@@ -898,7 +955,7 @@ describe("BetterAuthOAuthProvider settings", () => {
 		it("are checked against oauthProvider()'s default scopes when it sets none", async () => {
 			@Controller("profile")
 			class ProfileController {
-				@OAuthScopes("openid", "profile")
+				@OAuthScopes.require("openid", "profile")
 				@Get()
 				show() {}
 			}
@@ -931,13 +988,16 @@ describe("BetterAuthOAuthProvider settings", () => {
 	});
 });
 
-describe("@OAuthScopes() as Reflector's key", () => {
-	@OAuthScopes("read:post")
+describe("@OAuthScopes as Reflector's key", () => {
+	@OAuthScopes.require("read:post")
 	class PostsController {
 		list() {}
 
-		@OAuthScopes("write:post")
+		@OAuthScopes.require("write:post")
 		write() {}
+
+		@OAuthScopes.any()
+		feed() {}
 	}
 
 	const reflector = new Reflector();
@@ -959,6 +1019,10 @@ describe("@OAuthScopes() as Reflector's key", () => {
 		expect(scopesOf("write")).toEqual(["write:post"]);
 	});
 
+	it("reads any() as no scope required", () => {
+		expect(scopesOf("feed")).toEqual([]);
+	});
+
 	it("hands out the declaration itself, frozen", () => {
 		expect(Object.isFrozen(scopesOf("list"))).toBe(true);
 	});
@@ -973,8 +1037,17 @@ describe("@OAuthScopes() as Reflector's key", () => {
 	});
 
 	it("refuses a scope RFC 6749 doesn't allow", () => {
-		expect(() => OAuthScopes("read post")).toThrow(
-			'@OAuthScopes(): "read post" is not a valid OAuth scope.',
+		expect(() => OAuthScopes.require("read post")).toThrow(
+			'@OAuthScopes.require(): "read post" is not a valid OAuth scope.',
+		);
+	});
+
+	it("refuses require() without a scope, which any() says", () => {
+		const scopes: string[] = [];
+		expect(() =>
+			OAuthScopes.require(...(scopes as [string, ...string[]])),
+		).toThrow(
+			"@OAuthScopes.require() needs a scope: @OAuthScopes.any() accepts any access token issued for this API.",
 		);
 	});
 });

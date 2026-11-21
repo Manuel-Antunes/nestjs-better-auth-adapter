@@ -2,7 +2,7 @@ import { AuthenticationError } from "@nestjs/authentication";
 
 /**
  * A valid OAuth access token that lacks scopes the route requires
- * (`@OAuthScopes()`): a 403 with RFC 6750's `insufficient_scope` challenge
+ * (`@OAuthScopes.require()`): a 403 with RFC 6750's `insufficient_scope` challenge
  * naming them, so the client can ask the user for them. `scopes` lists them,
  * and the body's `details.scope` too, for transports without headers.
  */

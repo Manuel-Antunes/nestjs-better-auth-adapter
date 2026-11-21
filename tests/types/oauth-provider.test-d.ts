@@ -49,17 +49,34 @@ export class ReturnsOther extends BetterAuthOAuthProvider<Client> {
 	}
 }
 
-// OAuthScopes decorates classes and methods, with any number of scopes.
-@OAuthScopes("read:post")
+// OAuthScopes.require() and .any() decorate classes and methods.
+@OAuthScopes.require("read:post")
 class Posts {
-	@OAuthScopes()
+	@OAuthScopes.any()
 	list() {}
 
-	@OAuthScopes("read:post", "write:post")
+	@OAuthScopes.require("read:post", "write:post")
 	write() {}
 }
 // @ts-expect-error scopes are strings
-OAuthScopes(1);
+OAuthScopes.require(1);
+// @ts-expect-error require() takes a scope: any() says none
+OAuthScopes.require();
+// @ts-expect-error OAuthScopes is no decorator itself: say require() or any()
+OAuthScopes("read:post");
+
+// scopesFor() is the hook a subclass decides the scopes in.
+export class OpensEveryRoute extends BetterAuthOAuthProvider {
+	protected override scopesFor(context: ExecutionContext) {
+		return super.scopesFor(context) ?? [];
+	}
+}
+export class ReturnsScopeNumbers extends BetterAuthOAuthProvider {
+	// @ts-expect-error: scopes are strings
+	protected override scopesFor() {
+		return [1];
+	}
+}
 
 // And Reflector reads them by it, as by a key of Reflector.createDecorator().
 declare const reflector: Reflector;
