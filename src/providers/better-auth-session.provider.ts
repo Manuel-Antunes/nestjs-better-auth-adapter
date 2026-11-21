@@ -77,12 +77,7 @@ export abstract class BetterAuthSessionProvider extends AuthenticationProvider<
 			headers: requestHeaders,
 			returnHeaders: true,
 		});
-		const cookies = headers?.getSetCookie?.() ?? [];
-		if (cookies.length > 0)
-			appendSetCookies(
-				(await getResponseFromContext(context)).response,
-				cookies,
-			);
+		await this.appendCookies(headers, context);
 		// No credentials this provider understands: the guard tries the next one.
 		if (!result) return null;
 
@@ -92,6 +87,15 @@ export abstract class BetterAuthSessionProvider extends AuthenticationProvider<
 		this.#checkBans ??= checksBans(this.betterAuth.instance);
 		if (this.#checkBans) assertNotBanned(user);
 		return sessionAuthentication(user, session);
+	}
+
+	private async appendCookies(headers: Headers, context: ExecutionContext) {
+		const cookies = headers?.getSetCookie?.() ?? [];
+		if (cookies.length > 0)
+			appendSetCookies(
+				(await getResponseFromContext(context)).response,
+				cookies,
+			);
 	}
 
 	/**
