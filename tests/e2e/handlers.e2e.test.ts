@@ -2,8 +2,6 @@ import { Injectable } from "@nestjs/common";
 import request from "supertest";
 import {
 	AuthenticationRegistry,
-	type EmailVerificationLink,
-	type MagicLink,
 	PasswordHasher,
 	PasswordResetHandler,
 	type PasswordResetLink,
@@ -13,8 +11,11 @@ import { magicLink } from "better-auth/plugins/magic-link";
 import { twoFactor } from "better-auth/plugins/two-factor";
 import { hashPassword } from "better-auth/crypto";
 import {
+	type BetterAuthEmailVerificationLink,
 	BetterAuthEmailVerificationHandler,
+	type BetterAuthMagicLink,
 	BetterAuthMagicLinkHandler,
+	type BetterAuthPasswordResetLink,
 	BetterAuthPasswordResetHandler,
 	BetterAuthService,
 } from "../../src/index.ts";
@@ -50,19 +51,21 @@ function tokenOf(link: string, page: string): string {
 /** Records the password reset links it is asked to send. */
 @Injectable()
 class TestPasswordResetHandler extends BetterAuthPasswordResetHandler {
-	readonly sent: PasswordResetLink[] = [];
+	readonly sent: BetterAuthPasswordResetLink[] = [];
 	constructor(registry: AuthenticationRegistry, betterAuth: BetterAuthService) {
 		super(registry, betterAuth);
 		registry.registerHandler("passwordReset", this);
 	}
-	send(link: PasswordResetLink) {
+	send(link: BetterAuthPasswordResetLink) {
 		this.sent.push(link);
 	}
 }
 
 /**
  * Takes over `passwordReset` from `TestPasswordResetHandler`, as a wrapper
- * or a test double would: injecting it makes Nest create it first.
+ * or a test double would: injecting it makes Nest create it first. Its
+ * `send()` takes Nest's own link type, as handlers written before Better
+ * Auth's fields were passed did.
  */
 @Injectable()
 class ReplacingPasswordResetHandler extends BetterAuthPasswordResetHandler {
@@ -97,12 +100,12 @@ class PlainPasswordResetHandler extends PasswordResetHandler {
 /** Records the verification links it is asked to send. */
 @Injectable()
 class TestEmailVerificationHandler extends BetterAuthEmailVerificationHandler {
-	readonly sent: EmailVerificationLink[] = [];
+	readonly sent: BetterAuthEmailVerificationLink[] = [];
 	constructor(registry: AuthenticationRegistry, betterAuth: BetterAuthService) {
 		super(registry, betterAuth);
 		registry.registerHandler("emailVerification", this);
 	}
-	send(link: EmailVerificationLink) {
+	send(link: BetterAuthEmailVerificationLink) {
 		this.sent.push(link);
 	}
 }
@@ -110,15 +113,23 @@ class TestEmailVerificationHandler extends BetterAuthEmailVerificationHandler {
 /** Records the magic links it is asked to send. */
 @Injectable()
 class TestMagicLinkHandler extends BetterAuthMagicLinkHandler {
-	readonly sent: MagicLink[] = [];
+	readonly sent: BetterAuthMagicLink[] = [];
 	constructor(registry: AuthenticationRegistry, betterAuth: BetterAuthService) {
 		super(registry, betterAuth);
 		registry.registerHandler("magicLink", this);
 	}
-	send(link: MagicLink) {
+	send(link: BetterAuthMagicLink) {
 		this.sent.push(link);
 	}
 }
+
+const ORIGIN = "http://localhost:3000";
+
+/** The path and query of `link`, to follow it on the app under test. */
+const pathOf = (link: string) => {
+	const url = new URL(link);
+	return `${url.pathname}${url.search}`;
+};
 
 describe("handlers e2e: email handlers", () => {
 	it("sends the app's reset page with Better Auth's token, which resets the password", async () => {
@@ -228,6 +239,148 @@ describe("handlers e2e: email handlers", () => {
 				.get("/api/auth/magic-link/verify")
 				.query({ token });
 			expect(String(response.headers["set-cookie"])).toContain("session_token");
+		} finally {
+			await app.close();
+		}
+	});
+
+	it("hands a password reset's send() the user, the token and the request", async () => {
+		const auth = createTestAuth({ baseURL: ORIGIN });
+		const { app } = await createTestApp({
+			auth,
+			authentication: { passwordReset: pages.passwordReset },
+			controllers: [],
+			providers: [TestPasswordResetHandler],
+		});
+
+		try {
+			const { user } = await signUp(auth, { name: "Ana" });
+			await request(app.getHttpServer())
+				.post("/api/auth/request-password-reset")
+				.send({ email: user.email })
+				.expect(200);
+
+			const handler = app.get(TestPasswordResetHandler);
+			const [link] = handler.sent;
+			expect(link.user).toMatchObject({ id: user.id, name: "Ana" });
+			expect(link.token).toBe(tokenOf(link.url, pages.passwordReset.url));
+			expect(link.request).toBeInstanceOf(Request);
+			expect(new URL(link.request?.url ?? "").pathname).toBe(
+				"/api/auth/request-password-reset",
+			);
+
+			// Through auth.api without a request, there is none.
+			await auth.api.requestPasswordReset({ body: { email: user.email } });
+			expect(handler.sent[1].request).toBeUndefined();
+		} finally {
+			await app.close();
+		}
+	});
+
+	it("sends Better Auth's own verification link when url is its endpoint", async () => {
+		const auth = createTestAuth({ baseURL: ORIGIN, emailVerification: {} });
+		const { app } = await createTestApp({
+			auth,
+			authentication: {
+				emailVerification: { url: `${ORIGIN}/api/auth/verify-email` },
+			},
+			controllers: [],
+			providers: [TestEmailVerificationHandler],
+		});
+
+		try {
+			const server = app.getHttpServer();
+			const { user } = await signUp(auth, { name: "Ana" });
+			await request(server)
+				.post("/api/auth/send-verification-email")
+				.send({ email: user.email, callbackURL: "/welcome" })
+				.expect(200);
+
+			const handler = app.get(TestEmailVerificationHandler);
+			const link = handler.sent.at(-1) as BetterAuthEmailVerificationLink;
+			expect(link.user).toMatchObject({ id: user.id, name: "Ana" });
+			expect(link.token).toBe(
+				tokenOf(link.url, `${ORIGIN}/api/auth/verify-email`),
+			);
+			expect(link.request).toBeInstanceOf(Request);
+
+			// The link Better Auth would have sent: it verifies, and redirects.
+			const followed = await request(server).get(pathOf(link.url)).expect(302);
+			expect(followed.headers.location).toBe("/welcome");
+			const ctx = await auth.$context;
+			expect(
+				(await ctx.internalAdapter.findUserById(user.id))?.emailVerified,
+			).toBe(true);
+		} finally {
+			await app.close();
+		}
+	});
+
+	it("hands a magic link's send() the token, the metadata and the plugin's context", async () => {
+		const auth = createTestAuth({
+			baseURL: ORIGIN,
+			plugins: [magicLink({ sendMagicLink: fromNestHandler })],
+		});
+		const { app } = await createTestApp({
+			auth,
+			authentication: {
+				magicLink: { url: `${ORIGIN}/api/auth/magic-link/verify` },
+			},
+			controllers: [],
+			providers: [TestMagicLinkHandler],
+		});
+
+		try {
+			const server = app.getHttpServer();
+			const email = uniqueEmail();
+			await request(server)
+				.post("/api/auth/sign-in/magic-link")
+				.send({
+					email,
+					callbackURL: "/dashboard",
+					metadata: { invitedBy: "ana" },
+				})
+				.expect(200);
+
+			const handler = app.get(TestMagicLinkHandler);
+			const [link] = handler.sent;
+			expect(link.metadata).toEqual({ invitedBy: "ana" });
+			expect(link.token).toBe(
+				tokenOf(link.url, `${ORIGIN}/api/auth/magic-link/verify`),
+			);
+			expect(link.request).toBeInstanceOf(Request);
+			expect(link.context?.request).toBe(link.request);
+			expect(link.context?.body).toMatchObject({ email });
+
+			// The link Better Auth would have sent: it signs the user in, and redirects.
+			const followed = await request(server).get(pathOf(link.url)).expect(302);
+			expect(followed.headers.location).toBe(`${ORIGIN}/dashboard`);
+			expect(String(followed.headers["set-cookie"])).toContain("session_token");
+		} finally {
+			await app.close();
+		}
+	});
+
+	it("leaves metadata out of a magic link the client sent none with", async () => {
+		const auth = createTestAuth({
+			baseURL: ORIGIN,
+			plugins: [magicLink({ sendMagicLink: fromNestHandler })],
+		});
+		const { app } = await createTestApp({
+			auth,
+			authentication: { magicLink: pages.magicLink },
+			controllers: [],
+			providers: [TestMagicLinkHandler],
+		});
+
+		try {
+			await request(app.getHttpServer())
+				.post("/api/auth/sign-in/magic-link")
+				.send({ email: uniqueEmail() })
+				.expect(200);
+			expect(app.get(TestMagicLinkHandler).sent[0]).not.toHaveProperty(
+				"metadata",
+			);
 		} finally {
 			await app.close();
 		}

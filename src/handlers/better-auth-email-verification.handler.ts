@@ -5,6 +5,7 @@ import {
 } from "@nestjs/authentication";
 import { authenticationOptionsOf } from "../better-auth.service.ts";
 import type { AnyBetterAuthService } from "../interfaces/better-auth-service.interface.ts";
+import type { BetterAuthEmailVerificationLink } from "../interfaces/handler-links.interface.ts";
 import type { ConfigObject } from "../interfaces/handlers.interface.ts";
 import {
 	configSection,
@@ -20,9 +21,15 @@ import { OwnedByBetterAuthError } from "../errors/owned-by-better-auth.error.ts"
  * (`registry.registerHandler("emailVerification", this)`). Once registered,
  * it plugs itself into Better Auth's `emailVerification.sendVerificationEmail`
  * at startup, which then sends through the handler the registry holds: a
- * link to the `emailVerification.url` page of the `AuthenticationModule`
- * options, `?token=…`. That page hands the token to Better Auth
+ * link to the `emailVerification.url` of the `AuthenticationModule`
+ * options, `?token=…`, with the query Better Auth put on its own
+ * (`callbackURL`). `url` is either Better Auth's own endpoint
+ * (`https://example.com/api/auth/verify-email`), for the link Better Auth
+ * would have sent, or a page of the app that hands the token to it
  * (`GET /verify-email?token=…`).
+ *
+ * `send()` gets what Better Auth gave its `sendVerificationEmail` callback,
+ * on the link: the whole `user`, the `token` and the `request`.
  *
  * `isVerified()` keeps Nest's default (`user.emailVerified === true`, Better
  * Auth's field): `@Authenticate({ verifiedEmail: true })` asks it. Better
@@ -61,15 +68,28 @@ export abstract class BetterAuthEmailVerificationHandler
 		this.#restore = replaceCallback(
 			parent,
 			"emailVerification.sendVerificationEmail",
-			(async ({ user, url, token }: ConfigObject) =>
-				this.#registry.handler("emailVerification")?.send({
+			(async ({ user, url, token }: ConfigObject, request?: Request) =>
+				// BetterAuthHandlersCheck refuses any other registered handler.
+				(
+					this.#registry.handler("emailVerification") as
+						| BetterAuthEmailVerificationHandler
+						| undefined
+				)?.send({
 					userId: user.id,
 					email: user.email,
 					url: pageLink(page, token, url),
 					expiresAt: expiresIn(parent.expiresIn ?? 3600),
+					user,
+					token,
+					request,
 				})) as never,
 		);
 	}
+
+	/** Sends `link` to `link.email`, with what Better Auth gave its callback. */
+	abstract override send(
+		link: BetterAuthEmailVerificationLink,
+	): void | Promise<void>;
 
 	/** Puts Better Auth's own callback back. */
 	onModuleDestroy(): void {

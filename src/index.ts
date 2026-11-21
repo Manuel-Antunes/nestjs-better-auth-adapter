@@ -21,6 +21,7 @@ export type { BetterAuthApiKey } from "./interfaces/better-auth-plugin.interface
 export type * from "./interfaces/better-auth-providers.interface.ts";
 export type * from "./interfaces/better-auth-service.interface.ts";
 export type * from "./interfaces/better-auth-session.interface.ts";
+export type * from "./interfaces/handler-links.interface.ts";
 export type {
 	BetterAuthBodyParserOptions,
 	BetterAuthJsonBodyParserOptions,
