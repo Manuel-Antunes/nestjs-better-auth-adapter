@@ -91,9 +91,7 @@ export abstract class BetterAuthApiKeyProvider
 	override async authenticate(
 		context: ExecutionContext,
 	): Promise<AuthenticationResult<BetterAuthUser, ApiKeySession> | null> {
-		const key = this.headerNames
-			.map((name) => this.header(context, name))
-			.find(Boolean);
+		const key = await this.apiKey(context);
 		if (!key) return null;
 
 		// biome-ignore lint/suspicious/noExplicitAny: the API only exists with the api-key plugin
@@ -117,6 +115,20 @@ export abstract class BetterAuthApiKeyProvider
 				...(record.expiresAt && { expiresAt: new Date(record.expiresAt) }),
 			},
 		};
+	}
+
+	/**
+	 * The key a call presents, else `undefined` (no credentials): by default
+	 * the first of the `headers` given to `super()`, read with `header()`.
+	 * Override it to read keys elsewhere (another transport, a query
+	 * parameter...), or override `header()` to keep the same headers.
+	 */
+	protected apiKey(
+		context: ExecutionContext,
+	): string | undefined | Promise<string | undefined> {
+		return this.headerNames
+			.map((name) => this.header(context, name))
+			.find(Boolean);
 	}
 
 	/**

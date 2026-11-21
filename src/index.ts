@@ -25,6 +25,7 @@ export type {
 } from "./interfaces/better-auth-plugin.interface.ts";
 export type * from "./interfaces/better-auth-api-key.interface.ts";
 export type * from "./interfaces/better-auth-providers.interface.ts";
+export type { BetterAuthRequest } from "./interfaces/better-auth-request.interface.ts";
 export type * from "./interfaces/better-auth-service.interface.ts";
 export type * from "./interfaces/better-auth-session.interface.ts";
 export type * from "./interfaces/handler-links.interface.ts";

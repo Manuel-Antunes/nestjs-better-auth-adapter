@@ -247,6 +247,34 @@ export class ApiKeyAuth extends BetterAuthApiKeyProvider {
 - Bans (`admin()`) are checked after `validate()`, whatever it returns. For `BetterAuthOAuthProvider`, that holds for every token a user granted; a `client_credentials` token has no user to ban ([below](#admitting-client_credentials-tokens)).
 - `@Authenticate({ providers: [BetterAuthSessionProvider] })` matches every subclass.
 
+### Reading credentials from another transport
+
+The providers read the request through protected methods, like `header()` on `@nestjs/authentication`'s providers, so a subclass can serve a transport of its own. By default they read the HTTP request (GraphQL's `context.req` included), the WebSocket handshake, and the HTTP request an `@nestjs/mcp` or `@nestjs/ai` call arrived in.
+
+| Base class | Method | Reads |
+| --- | --- | --- |
+| All | `header(context, name)` (Nest's) | One request header |
+| `BetterAuthSessionProvider` | `request(context)` | The headers `getSession()` reads, and the method the cross-origin check reads (`BetterAuthRequest`) |
+| `BetterAuthSessionProvider` | `appendCookies(context, cookies)` | Sends the `Set-Cookie` headers `getSession()` answered with |
+| `BetterAuthJwtProvider` | `token(context)` | The bearer token |
+| `BetterAuthApiKeyProvider` | `apiKey(context)` | The key, from the `headers` given to `super()` |
+| `BetterAuthOAuthProvider` | `requestPath(context)`, `requestTarget(context)` | The path that picks the audience; the method and URL a DPoP proof signs |
+| `BetterAuthOAuthProvider` | `sendChallenge(context, challenge)` | Sends a 403 `insufficient_scope` challenge |
+
+```ts
+@Injectable()
+export class SessionAuth extends BetterAuthSessionProvider {
+  // ...
+  protected override async request(context: ExecutionContext): Promise<BetterAuthRequest | undefined> {
+    if (context.getType<string>() !== 'my-transport') return super.request(context);
+    const { metadata } = context.switchToRpc().getContext();
+    return { headers: { authorization: metadata.authorization } };
+  }
+}
+```
+
+Return `undefined` for no credentials: the guard tries the next provider.
+
 ### Errors
 
 Every error this package throws is a class of its own, exported for exception filters. The `OAuth*` errors come from `nestjs-better-auth-adapter/oauth-provider`, the others from the package itself:

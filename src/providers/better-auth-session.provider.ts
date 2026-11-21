@@ -9,6 +9,7 @@ import { BetterAuthSessionError } from "../errors/better-auth-session.error.ts";
 import { isCrossOriginWrite } from "../http/cross-origin.ts";
 import { appendSetCookies } from "../http/set-cookie.ts";
 import { cachedOriginCheck } from "../http/trusted-origins-cors.ts";
+import type { BetterAuthRequest } from "../interfaces/better-auth-request.interface.ts";
 import type {
 	BetterAuthSession,
 	BetterAuthUser,
@@ -46,6 +47,10 @@ import { sessionAuthentication } from "./session-authentication.ts";
  * Over WebSockets it reads socket.io's handshake, or the upgrade request
  * `WsAuthenticator` keeps on a `ws` client.
  *
+ * It reads the request with {@link request} and sends the cookies with
+ * {@link appendCookies}: override them for a transport of your own, as
+ * `header()` on Nest's providers.
+ *
  * A session satisfies `@Authenticate({ mfa: true })` once the `nestjs()`
  * plugin recorded a verified second factor on it (`mfaVerifiedAt`), never
  * because the user enrolled one: `twoFactor()` does not challenge magic
@@ -62,7 +67,7 @@ export abstract class BetterAuthSessionProvider extends AuthenticationProvider<
 	async authenticate(
 		context: ExecutionContext,
 	): Promise<AuthenticationResult<BetterAuthUser, BetterAuthSession> | null> {
-		const request = await getAuthRequest(context);
+		const request = await this.request(context);
 		if (!request) return null;
 		const requestHeaders = fromNodeHeaders(request.headers);
 		// The cookie on a write, or a WebSocket handshake, from an origin Better
@@ -77,7 +82,7 @@ export abstract class BetterAuthSessionProvider extends AuthenticationProvider<
 			headers: requestHeaders,
 			returnHeaders: true,
 		});
-		await this.appendCookies(headers, context);
+		await this.appendCookies(context, headers?.getSetCookie?.() ?? []);
 		// No credentials this provider understands: the guard tries the next one.
 		if (!result) return null;
 
@@ -89,8 +94,33 @@ export abstract class BetterAuthSessionProvider extends AuthenticationProvider<
 		return sessionAuthentication(user, session);
 	}
 
-	private async appendCookies(headers: Headers, context: ExecutionContext) {
-		const cookies = headers?.getSetCookie?.() ?? [];
+	/**
+	 * The request behind a call: its headers, which `getSession()` reads
+	 * (cookie, `Authorization`), and its method, which the cross-origin check
+	 * reads. `undefined` when the transport has none: no credentials.
+	 *
+	 * By default the HTTP request (GraphQL's `context.req` included),
+	 * socket.io's handshake or the upgrade request of a `ws` client, or the
+	 * HTTP request an `@nestjs/mcp` or `@nestjs/ai` call arrived in. Override
+	 * it for another transport.
+	 */
+	protected request(
+		context: ExecutionContext,
+	): BetterAuthRequest | undefined | Promise<BetterAuthRequest | undefined> {
+		return getAuthRequest(context);
+	}
+
+	/**
+	 * Sends the `Set-Cookie` headers `getSession()` answered with (the
+	 * session's sliding expiry, the cookie cache, an ended session's cookies
+	 * cleared). By default on the HTTP response (GraphQL's included); a
+	 * transport without one, as WebSockets, drops them. Override it for
+	 * another transport.
+	 */
+	protected async appendCookies(
+		context: ExecutionContext,
+		cookies: readonly string[],
+	): Promise<void> {
 		if (cookies.length > 0)
 			appendSetCookies(
 				(await getResponseFromContext(context)).response,

@@ -1,4 +1,10 @@
-import { Inject, Injectable, Module } from "@nestjs/common";
+import {
+	type ExecutionContext,
+	Inject,
+	Injectable,
+	Module,
+} from "@nestjs/common";
+import { ExecutionContextHost } from "@nestjs/core/helpers/execution-context-host.js";
 import { AuthenticationRegistry } from "@nestjs/authentication";
 import { apiKey } from "@better-auth/api-key";
 import { admin } from "better-auth/plugins/admin";
@@ -10,6 +16,7 @@ import {
 	BetterAuthApiKeyProvider,
 	type BetterAuthJwtClaims,
 	BetterAuthJwtProvider,
+	type BetterAuthRequest,
 	BetterAuthSessionProvider,
 	type BetterAuthUser,
 } from "../../src/index.ts";
@@ -69,6 +76,42 @@ class BlockingJwtAuth extends BetterAuthJwtProvider {
 	protected override async validate(payload: BetterAuthJwtClaims) {
 		const user = await super.validate(payload);
 		return user?.name === "Blocked" ? null : user;
+	}
+}
+
+/** Reads the session token from a header of its own, as a custom transport would. */
+@Injectable()
+class HeaderSessionAuth extends BetterAuthSessionProvider {
+	constructor(
+		@Inject(AuthenticationRegistry) registry: AuthenticationRegistry,
+	) {
+		super();
+		registry.registerProvider(this, { order: 0 });
+	}
+
+	protected override request(
+		context: ExecutionContext,
+	): BetterAuthRequest | undefined {
+		const token = this.header(context, "x-session-token");
+		return token
+			? { headers: { authorization: `Bearer ${token}` } }
+			: undefined;
+	}
+}
+
+/** Reads the key from the query string. */
+@Injectable()
+class QueryApiKeyAuth extends BetterAuthApiKeyProvider {
+	constructor(
+		@Inject(AuthenticationRegistry) registry: AuthenticationRegistry,
+	) {
+		super();
+		registry.registerProvider(this, { order: 2 });
+	}
+
+	protected override apiKey(context: ExecutionContext): string | undefined {
+		const key = context.switchToHttp().getRequest().query?.key;
+		return typeof key === "string" ? key : undefined;
 	}
 }
 
@@ -190,6 +233,87 @@ describe("provider subclasses", () => {
 		await expect(
 			createTestApp({ auth: createTestAuth(), authProviders: [ApiKeyAuth] }),
 		).rejects.toThrow("ApiKeyAuth verifies the keys of Better Auth's apiKey()");
+	});
+});
+
+describe("request accessors", () => {
+	it("read the session's request through an overridable request()", async () => {
+		const auth = createTestAuth();
+		const { app } = await createTestApp({
+			auth,
+			authProviders: [HeaderSessionAuth],
+		});
+
+		try {
+			const { token, user } = await signUp(auth);
+			const response = await request(app.getHttpServer())
+				.get("/test/protected")
+				.set("x-session-token", token ?? "")
+				.expect(200);
+			expect(response.body.user.id).toBe(user.id);
+			// The request it reads no longer has the Authorization header.
+			await request(app.getHttpServer())
+				.get("/test/protected")
+				.set("Authorization", `Bearer ${token}`)
+				.expect(401);
+		} finally {
+			await app.close();
+		}
+	});
+
+	it("read the API key through an overridable apiKey()", async () => {
+		const auth = createTestAuth({ plugins: [apiKey()] });
+		const { app } = await createTestApp({
+			auth,
+			authProviders: [QueryApiKeyAuth],
+		});
+
+		try {
+			const { user } = await signUp(auth);
+			const { key } = await api(auth).createApiKey({
+				body: { userId: user.id },
+			});
+			const response = await request(app.getHttpServer())
+				.get("/test/protected")
+				.query({ key })
+				.expect(200);
+			expect(response.body.user.id).toBe(user.id);
+			await request(app.getHttpServer())
+				.get("/test/protected")
+				.set("x-api-key", key)
+				.expect(401);
+		} finally {
+			await app.close();
+		}
+	});
+
+	it("read the HTTP request an @nestjs/mcp call arrived in, by default", async () => {
+		const auth = createTestAuth();
+		const { app } = await createTestApp({ auth, authProviders: [SessionAuth] });
+
+		try {
+			const { token, user } = await signUp(auth);
+			// An MCP call's arguments: [input, { request }].
+			const context = new ExecutionContextHost([
+				{},
+				{
+					request: {
+						method: "POST",
+						url: "/mcp",
+						headers: { authorization: `Bearer ${token}` },
+					},
+				},
+			]);
+			context.setType("mcp");
+			const result = await app.get(SessionAuth).authenticate(context);
+			expect(result?.user.id).toBe(user.id);
+
+			const stdio = new ExecutionContextHost([{}, {}]);
+			stdio.setType("mcp");
+			expect(await app.get(SessionAuth).authenticate(stdio)).toBeNull();
+		} finally {
+			await app.close();
+		}
 	});
 });
 

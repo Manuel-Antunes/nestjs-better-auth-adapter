@@ -159,7 +159,7 @@ export abstract class BetterAuthOAuthProvider<
 			readonly string[] | undefined
 		>(OAuthScopes, [context.getHandler(), context.getClass()]);
 
-		const target = await this.target(context);
+		const target = await this.requestTarget(context);
 		const resource = this.resourceFor(context);
 		let claims: Record<string, unknown>;
 		try {
@@ -287,8 +287,20 @@ export abstract class BetterAuthOAuthProvider<
 	private resourceFor(context?: ExecutionContext): OAuthResourceIdentifier {
 		return resourceForPath(
 			this.#settings.resources,
-			context && getRequestPathSync(context),
+			context && this.requestPath(context),
 		);
+	}
+
+	/**
+	 * The path of the request behind a call, without its query, which picks
+	 * the audience among `resources`; `undefined` for none (the first
+	 * audience). Synchronous, since `challenge()` is. By default the HTTP
+	 * request's (GraphQL's, and the one an `@nestjs/mcp` or `@nestjs/ai` call
+	 * arrived in, included) or a WebSocket's handshake. Override it for
+	 * another transport.
+	 */
+	protected requestPath(context: ExecutionContext): string | undefined {
+		return getRequestPathSync(context);
 	}
 
 	/**
@@ -306,8 +318,15 @@ export abstract class BetterAuthOAuthProvider<
 		];
 	}
 
-	/** The method and absolute URL a DPoP proof signs (`htm`, `htu`). */
-	private async target(context: ExecutionContext) {
+	/**
+	 * The method and absolute URL a DPoP proof signs (`htm`, `htu`). By
+	 * default the HTTP request's (GraphQL's, and the one an `@nestjs/mcp` or
+	 * `@nestjs/ai` call arrived in, included), or a WebSocket handshake's, a
+	 * `GET`. Override it for another transport.
+	 */
+	protected async requestTarget(
+		context: ExecutionContext,
+	): Promise<{ method: string; url: string }> {
 		const request = await getRequestFromContext(context);
 		// A WebSocket's handshake (socket.io's, or the upgrade request
 		// WsAuthenticator keeps on a `ws` client), else the HTTP request
@@ -365,17 +384,27 @@ export abstract class BetterAuthOAuthProvider<
 			});
 
 		// The guard sends a challenge with 401s only.
-		if (challenge && context.getType() === "http") {
-			this.adapterHost.httpAdapter?.setHeader(
-				context.switchToHttp().getResponse(),
-				"WWW-Authenticate",
-				challenge,
-			);
-		}
+		if (challenge) this.sendChallenge(context, challenge);
 		const scope = challenge && /[\s,]scope="([^"]*)"/.exec(challenge)?.[1];
 		return new OAuthInsufficientScopeError(
 			message,
 			scope ? scope.split(" ") : [],
+			challenge,
+		);
+	}
+
+	/**
+	 * Sends the `WWW-Authenticate` challenge of a 403 `insufficient_scope`
+	 * (the guard sends a 401's): what an OAuth client, an MCP client
+	 * among them, reads to ask for the missing scopes. By default on the HTTP
+	 * response; other transports have none. Override it for another
+	 * transport.
+	 */
+	protected sendChallenge(context: ExecutionContext, challenge: string): void {
+		if (context.getType() !== "http") return;
+		this.adapterHost.httpAdapter?.setHeader(
+			context.switchToHttp().getResponse(),
+			"WWW-Authenticate",
 			challenge,
 		);
 	}

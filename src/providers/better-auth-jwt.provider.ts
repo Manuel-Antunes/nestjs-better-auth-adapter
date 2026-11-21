@@ -130,8 +130,13 @@ export abstract class BetterAuthJwtProvider
 		return `Bearer realm="${this.realm}"`;
 	}
 
-	/** The `Authorization: Bearer` token, else socket.io's `handshake.auth.token`. */
-	private token(context: ExecutionContext): string | undefined {
+	/**
+	 * The token a call presents, else `undefined` (no credentials): the
+	 * `Authorization: Bearer` token, read with `header()`, else socket.io's
+	 * `handshake.auth.token`. Override it to read tokens elsewhere, or
+	 * override `header()` to keep reading `Authorization`.
+	 */
+	protected token(context: ExecutionContext): string | undefined {
 		const authorization = this.header(context, "authorization");
 		if (authorization)
 			return /^Bearer\s+(\S+)$/i.exec(authorization.trim())?.[1];

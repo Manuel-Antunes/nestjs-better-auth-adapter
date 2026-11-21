@@ -1,6 +1,9 @@
-import type { IncomingHttpHeaders } from "node:http";
 import type { ExecutionContext } from "@nestjs/common";
 import type { GqlExecutionContext as GqlExecutionContextType } from "@nestjs/graphql";
+import type {
+	BetterAuthRequest,
+	ContextType,
+} from "./interfaces/better-auth-request.interface.ts";
 
 let GqlExecutionContext: typeof GqlExecutionContextType | undefined;
 
@@ -14,12 +17,29 @@ async function getGqlExecutionContext(): Promise<
 }
 
 /**
- * Extracts the request object from either HTTP, GraphQL or WebSocket execution context
+ * The HTTP request an `@nestjs/mcp` call (a tool, resource or prompt) or an
+ * `@nestjs/ai` agent function call arrived in, read from its arguments,
+ * `[input, context]`, as `@nestjs/authentication` reads it: neither package
+ * is a dependency. `undefined` over stdio, and in a job.
+ */
+// biome-ignore lint/suspicious/noExplicitAny: the request type depends on the transport
+function callRequestOf(context: ExecutionContext): any {
+	const call = context.getArgByIndex(1);
+	return typeof call === "object" && call !== null ? call.request : undefined;
+}
+
+/**
+ * Extracts the request object from an HTTP, GraphQL, WebSocket, MCP or agent
+ * function execution context.
  * @param context - The execution context
  * @returns The request object
  */
 export async function getRequestFromContext(context: ExecutionContext) {
-	const contextType = context.getType<"graphql" | "ws" | "http">();
+	const contextType = context.getType<ContextType>();
+	if (contextType === "mcp" || contextType === "ai") {
+		return callRequestOf(context);
+	}
+
 	if (contextType === "graphql") {
 		return (await getGqlExecutionContext()).create(context).getContext().req;
 	}
@@ -33,13 +53,14 @@ export async function getRequestFromContext(context: ExecutionContext) {
 
 /**
  * The path of the request behind a call, without its query, read
- * synchronously: the HTTP request's (GraphQL's `context.req` included) or a
- * WebSocket's handshake. `undefined` when there is none (RPC).
+ * synchronously: the HTTP request's (GraphQL's `context.req`, and the one an
+ * MCP or agent function call arrived in, included) or a WebSocket's
+ * handshake. `undefined` when there is none (RPC).
  */
 export function getRequestPathSync(
 	context: ExecutionContext,
 ): string | undefined {
-	const contextType = context.getType<"graphql" | "ws" | "http">();
+	const contextType = context.getType<ContextType>();
 	// biome-ignore lint/suspicious/noExplicitAny: the request type depends on the transport
 	let request: any;
 	if (contextType === "ws") {
@@ -52,6 +73,8 @@ export function getRequestPathSync(
 		request = (args.length === 3 ? args[1] : args[2])?.req;
 	} else if (contextType === "http") {
 		request = context.switchToHttp().getRequest();
+	} else if (contextType === "mcp" || contextType === "ai") {
+		request = callRequestOf(context);
 	}
 	const url = request?.originalUrl ?? request?.url ?? request?.raw?.url;
 	return typeof url === "string" ? url.split("?", 1)[0] : undefined;
@@ -60,19 +83,15 @@ export function getRequestPathSync(
 /**
  * The request behind a call, as far as authentication needs it, as
  * `@nestjs/authentication` reads it: the HTTP request, GraphQL's
- * `context.req`, or a WebSocket's handshake (socket.io's `handshake`, or
+ * `context.req`, a WebSocket's handshake (socket.io's `handshake`, or
  * the upgrade request `WsAuthenticator` keeps on a `ws` client as
- * `client.request`). `undefined` over RPC.
+ * `client.request`), or the HTTP request an MCP or agent function call
+ * arrived in. `undefined` over RPC, and MCP over stdio.
  */
-export async function getAuthRequest(context: ExecutionContext): Promise<
-	| {
-			headers: IncomingHttpHeaders;
-			method?: string;
-			url?: string;
-	  }
-	| undefined
-> {
-	const contextType = context.getType<"graphql" | "ws" | "http">();
+export async function getAuthRequest(
+	context: ExecutionContext,
+): Promise<BetterAuthRequest | undefined> {
+	const contextType = context.getType<ContextType>();
 	if (contextType === "ws") {
 		const client = context.switchToWs().getClient();
 		if (client?.handshake?.headers)
@@ -82,7 +101,13 @@ export async function getAuthRequest(context: ExecutionContext): Promise<
 			? { headers: upgrade.headers, method: upgrade.method, url: upgrade.url }
 			: undefined;
 	}
-	if (contextType !== "http" && contextType !== "graphql") return undefined;
+	if (
+		contextType !== "http" &&
+		contextType !== "graphql" &&
+		contextType !== "mcp" &&
+		contextType !== "ai"
+	)
+		return undefined;
 	const request = await getRequestFromContext(context);
 	return request?.headers ? request : undefined;
 }
@@ -97,7 +122,7 @@ export async function getResponseFromContext(
 	context: ExecutionContext,
 	// biome-ignore lint/suspicious/noExplicitAny: the response type depends on the HTTP adapter
 ): Promise<{ response: any }> {
-	const contextType = context.getType<"graphql" | "ws" | "http">();
+	const contextType = context.getType<ContextType>();
 	if (contextType === "http")
 		return { response: context.switchToHttp().getResponse() };
 	if (contextType === "graphql") {
