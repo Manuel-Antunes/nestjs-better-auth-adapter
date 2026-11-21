@@ -194,9 +194,16 @@ export function createAuth({
 					issuer: env.BETTER_AUTH_URL,
 					audience: env.BETTER_AUTH_URL,
 					expirationTime: "15m",
-					definePayload: ({ user }) => ({
+					// `activeOrganizationId` is the session's (see SessionDatabaseHooks),
+					// as Keycloak's organization claim: it holds for the token's 15
+					// minutes, and a switch (`/organization/set-active`) shows in the
+					// next token.
+					definePayload: ({ user, session }) => ({
 						email: user.email,
 						role: (user as { role?: string }).role,
+						activeOrganizationId:
+							(session as { activeOrganizationId?: string | null })
+								.activeOrganizationId ?? null,
 					}),
 				},
 			}),

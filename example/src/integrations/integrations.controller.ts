@@ -1,4 +1,4 @@
-import { Controller, Get, Query } from "@nestjs/common";
+import { Controller, Get, NotFoundException, Query } from "@nestjs/common";
 import {
 	ApiKeyProvider,
 	type ApiKeySession,
@@ -51,11 +51,27 @@ export class IntegrationsController {
 @Authenticate({ providers: [BetterAuthJwtProvider] })
 @Can.Anyone()
 export class InternalController {
+	constructor(private readonly projects: ProjectsService) {}
+
 	@Get("whoami")
 	whoami(
 		@CurrentUser("id") userId: string,
 		@CurrentSession() claims: BetterAuthJwtClaims,
 	) {
-		return { userId, claims };
+		return {
+			userId,
+			// The organization the token was issued for (`definePayload`).
+			organizationId: claims.activeOrganizationId ?? null,
+			claims,
+		};
+	}
+
+	/** The token's organization decides, as `@Can(..., activeOrganization)` does for a session. */
+	@Get("projects")
+	listProjects(@CurrentSession() claims: BetterAuthJwtClaims) {
+		const organizationId = claims.activeOrganizationId;
+		if (typeof organizationId !== "string")
+			throw new NotFoundException("No active organization");
+		return this.projects.list(organizationId);
 	}
 }
