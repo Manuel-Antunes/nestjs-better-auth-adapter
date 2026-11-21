@@ -17,6 +17,8 @@ import type { BetterAuthJwtClaims } from "../interfaces/jwt-claims.interface.ts"
 import { findPlugin } from "../plugins.ts";
 import { isOAuthAccessToken } from "../oauth/access-token.ts";
 import { assertNotBanned, checksBans } from "./banned-user.ts";
+import type { Auth } from "better-auth";
+import type { jwt } from "better-auth/plugins/jwt";
 
 const JWT_PATTERN = /^[\w-]+\.[\w-]+\.[\w-]+$/;
 
@@ -47,7 +49,13 @@ export abstract class BetterAuthJwtProvider
 	extends AuthenticationProvider<BetterAuthUser, BetterAuthJwtClaims>
 	implements OnModuleInit
 {
-	@Inject(BetterAuthService) protected readonly betterAuth!: BetterAuthService;
+	@Inject(BetterAuthService)
+	protected readonly betterAuth!: BetterAuthService<
+		Auth<{
+			baseURL: string;
+			plugins: [ReturnType<typeof jwt>];
+		}>
+	>;
 	protected readonly realm: string;
 	#checkBans?: boolean;
 
@@ -74,11 +82,7 @@ export abstract class BetterAuthJwtProvider
 		const ctx = await auth.$context;
 		const baseURL =
 			typeof ctx.options.baseURL === "string" ? ctx.options.baseURL : "";
-		const jwtOptions = (
-			plugin.options as
-				| { jwt?: { issuer?: string; audience?: unknown } }
-				| undefined
-		)?.jwt;
+		const jwtOptions = plugin.options?.jwt;
 		if (!(jwtOptions?.issuer ?? baseURL) || !(jwtOptions?.audience ?? baseURL))
 			throw new BetterAuthConfigurationError(
 				`${name} needs the JWT issuer and audience checked: set Better Auth's baseURL (or BETTER_AUTH_URL), or jwt({ jwt: { issuer, audience } }).`,
